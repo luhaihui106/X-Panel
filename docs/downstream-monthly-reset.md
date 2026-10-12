@@ -33,6 +33,19 @@ or proprietary source are used or bypassed.
   after the destructive core read and before SQLite commit can lose the batch;
   Xray provides no atomic durable acknowledgement spanning these two systems.
   External notifications remain best-effort and run only after commit.
+- Core AddUser/RemoveUser/DelInbound actions in renewal and invalidation are queued
+  and run only after successful SQLite commit. API failure cannot roll back a
+  committed accounting batch: it returns a restart request (not a persistence
+  error), clears the batch exactly once, and the existing traffic job schedules
+  reconciliation from committed DB configuration. Restart is asynchronous and may
+  fail; this is not atomic DB/core consistency or immediate compensation.
+- Client and inbound edits/deletes share the scheduled collector mutex. A retained
+  failed batch refuses identity mutations until a successful scheduled retry;
+  unmatched nonzero client deltas fail and remain pending instead of being lost.
+  Email/protocol-key changes are refused while Xray is running, because a drain
+  followed by a live rename still races new old-identity counters. Collect final
+  counters before stopping Xray, then edit; stopping/restarting itself retains the
+  upstream destructive-counter crash/stop limitation. No crash durability is claimed.
 - Older API callers omitting both fields on edits retain existing values;
   explicit false disables. Old exports without fields remain disabled. The
   private cycle marker is not accepted from client JSON; DB backups preserve it.
