@@ -27,7 +27,7 @@ Independent read-only Hermes reviews under scratch x-panel-stage1-review*.txt fo
 Coverage limitation: administrator destructive handler side effects are not exercised with full dry adapters; tests assert gate allowance without executing backup/reset/install/restart. UsersShared end-to-end update handler and transient duplicate-email retry need independent behavioral acceptance. No production RN5 changes, release, installer remake or merge performed.
 
 ## Resume checkpoint (NOT stage-1 acceptance)
-Resume base exact SHA: e58910bffd5aaeb2b16c754c3a40ddf1e45be63b. This checkpoint is intentionally incomplete and PR #8 must remain draft. The code checkpoint SHA is recorded in the subsequent report commit (a commit cannot embed its own SHA).
+Resume base exact SHA: e58910bffd5aaeb2b16c754c3a40ddf1e45be63b. Tested and independently reviewed code checkpoint exact SHA: 5a0a605d2172ed19605e4ba7321e28820ab7cd03. This checkpoint is intentionally incomplete and PR #8 must remain draft. Subsequent report-only commit does not change the tested code.
 
 - Added real loopback Telegram callback denial for every allowlisted action except the three ordinary read actions. Attached isolated SQLite, asserted deny-only API calls and unchanged client traffic/binding. No admin destructive dispatch was run.
 - Replaced legacy nonnegative random request IDs with negative IDs from a durable SQLite AUTOINCREMENT ledger. Successful reservation precedes publishing the selection keyboard; storage errors/exhaustion remove pending and fail closed. This prevents legacy-positive collisions and reuse across ordinary database reopen, NOT database rollback/restore.
