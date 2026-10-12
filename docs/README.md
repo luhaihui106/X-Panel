@@ -9,6 +9,7 @@
 - [客户端月重置：语义、实现和初期验证](downstream-monthly-reset.md)
 - [身份退休与流量归档设计](traffic-identity-retirement.md)
 - [身份处理阶段性验证报告](traffic-identity-validation.md)
+- [界面截图与隔离演示来源](screenshots/README.md)
 - [首页自动推广删除与验证](home-promotion-removal.md)
 
 阶段性报告仅覆盖各自注明的提交和测试范围，不能将其中“未部署/未覆盖其他平台”等当时状态当作当前完整状态；当前公开分支/Release 状态以项目入口及实际 GitHub 记录为准。文档不存放生产运维数据或本地验收包。
