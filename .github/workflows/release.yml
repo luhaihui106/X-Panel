@@ -2,21 +2,7 @@ name: Release X-Panel
 
 on:
   workflow_dispatch:
-  release:
-    types: [published]
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/release.yml'
-      - '**.js'
-      - '**.css'
-      - '**.html'
-      - '**.sh'
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 'x-ui.service'
+  # Source merges are not release authorization. Build only on explicit dispatch.
 
 jobs:
   # ===============================================================
