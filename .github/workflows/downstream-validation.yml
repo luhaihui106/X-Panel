@@ -1,7 +1,7 @@
 name: Downstream validation
 on:
   push:
-    branches: ['feat/**', 'integration/**']
+    branches: ['main', 'feat/**', 'integration/**']
   pull_request:
 permissions:
   contents: read
