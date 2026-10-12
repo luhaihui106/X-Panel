@@ -23,6 +23,20 @@ cannot produce late traffic. This local restriction is not a global edit ban;
 ordinary edits, other clients, and collector retries continue. Truly unknown
 nonzero identities remain explicit integrity errors, not silently discarded.
 
+Online inbound creation/import validates identities from Settings regardless of
+whether ClientStats is supplied. Nonempty imported statistics must match clients
+one-to-one by exact email (not merely case-insensitively); missing, duplicate or
+unrelated rows are rejected without persistence or core calls. Valid imports keep
+usage counters, allocate fresh statistics IDs, bind the new inbound, and enroll
+monthly settings from the actual clients. Empty statistics retain ordinary
+creation behavior. This is distinct from offline whole-database restoration.
+
+Client retirement uses an explicit snapshot schema including
+`monthly_reset_day` and `monthly_reset_at`, without exposing those internal fields
+in public ClientTraffic JSON. Late deltas update archive counters, not the
+historical snapshot. Existing incomplete snapshots cannot recover omitted fields
+and are not backfilled with guessed values.
+
 Scope: small additive model/migration and service helpers, no unrelated modules.
 Persistent ownership survives panel restart; the existing in-memory destructive
 read-to-commit crash window is **not** made durable by this design. Archives can

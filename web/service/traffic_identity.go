@@ -53,6 +53,23 @@ func retireInbound(tx *gorm.DB, inbound *model.Inbound) error {
 	return tx.Create(&owner).Error
 }
 
+// Explicit archive schema: public ClientTraffic JSON deliberately hides monthly fields.
+type retiredClientSnapshot struct {
+	Id              int    `json:"id"`
+	InboundId       int    `json:"inboundId"`
+	Enable          bool   `json:"enable"`
+	Email           string `json:"email"`
+	Up              int64  `json:"up"`
+	Down            int64  `json:"down"`
+	AllTime         int64  `json:"allTime"`
+	ExpiryTime      int64  `json:"expiryTime"`
+	Total           int64  `json:"total"`
+	Reset           int    `json:"reset"`
+	MonthlyResetDay int    `json:"monthly_reset_day"`
+	MonthlyResetAt  int64  `json:"monthly_reset_at"`
+	LastOnline      int64  `json:"lastOnline"`
+}
+
 func retireClient(tx *gorm.DB, email string) error {
 	var stat xray.ClientTraffic
 	err := tx.Where("email = ?", email).First(&stat).Error
@@ -62,7 +79,12 @@ func retireClient(tx *gorm.DB, email string) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := json.Marshal(stat)
+	snapshot, err := json.Marshal(retiredClientSnapshot{
+		Id: stat.Id, InboundId: stat.InboundId, Enable: stat.Enable, Email: stat.Email,
+		Up: stat.Up, Down: stat.Down, AllTime: stat.AllTime, ExpiryTime: stat.ExpiryTime,
+		Total: stat.Total, Reset: stat.Reset, MonthlyResetDay: stat.MonthlyResetDay,
+		MonthlyResetAt: stat.MonthlyResetAt, LastOnline: stat.LastOnline,
+	})
 	if err != nil {
 		return err
 	}

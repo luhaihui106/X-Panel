@@ -280,6 +280,39 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	}
 	defer tx.Rollback()
 
+	// Settings defines the actual core identities, even when importing statistics.
+	for _, client := range clients {
+		if err = reserveTrafficIdentity(tx, "client", client.Email); err != nil {
+			return inbound, false, err
+		}
+	}
+	if len(inbound.ClientStats) != 0 {
+		if len(inbound.ClientStats) != len(clients) {
+			return inbound, false, common.NewError("imported client statistics must match Settings clients exactly")
+		}
+		byEmail := make(map[string]model.Client, len(clients))
+		for _, client := range clients {
+			byEmail[client.Email] = client
+		}
+		for index := range inbound.ClientStats {
+			stat := &inbound.ClientStats[index]
+			client, ok := byEmail[stat.Email]
+			if !ok {
+				return inbound, false, common.NewError("imported client statistics must match Settings clients exactly")
+			}
+			delete(byEmail, stat.Email)
+			// Imported database IDs cannot select or overwrite an existing owner.
+			stat.Id = 0
+			stat.InboundId = inbound.Id
+			day, at, enrollmentErr := monthlyEnrollment(tx, &client)
+			if enrollmentErr != nil {
+				return inbound, false, enrollmentErr
+			}
+			stat.MonthlyResetDay = day
+			stat.MonthlyResetAt = at
+		}
+	}
+
 	// 中文注释：保存入站信息到数据库 (此时 inbound 对象已包含我们手动设置的 ID)
 	err = tx.Save(inbound).Error
 	if err == nil {
@@ -288,10 +321,6 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 				if err = s.AddClientStat(tx, inbound.Id, &client); err != nil {
 					return inbound, false, err
 				}
-			}
-		} else {
-			for _, stat := range inbound.ClientStats {
-				if err := reserveTrafficIdentity(tx, "client", stat.Email); err != nil { return inbound, false, err }
 			}
 		}
 	} else {
