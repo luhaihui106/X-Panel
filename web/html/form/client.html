@@ -195,7 +195,9 @@
     <a-form-item label="每月流量重置 / Monthly traffic reset">
         <a-switch v-model="client.monthlyResetEnabled"></a-switch>
         <a-input-number v-if="client.monthlyResetEnabled" v-model.number="client.monthlyResetDay" :min="1" :max="31" :precision="0"></a-input-number>
-        <div>默认关闭。按面板设置时区午夜执行；短月取最后一天。启用/修改日期从下一周期开始，停机后只补最近一次。仅清上下行，不修改额度、身份或到期时间；原续期规则独立运行。</div>
+        <a-tooltip title="默认关闭。按面板设置时区午夜执行。启用/修改日期从下一周期开始，停机后只补最近一次。不修改额度、身份或到期时间；原续期规则独立运行。">
+            <div>按面板时区重置；短月取月末，仅清周期流量，累计保留。</div>
+        </a-tooltip>
     </a-form-item>
 </a-form>
 {{end}}

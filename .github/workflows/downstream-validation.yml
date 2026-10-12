@@ -20,6 +20,7 @@ jobs:
       - run: go test -vet=off ./...
       - run: go test -vet=off -race ./web/service
       - run: node web/assets/js/model/monthly-reset.test.cjs
+      - run: node --test web/assets/js/model/monthly-help.test.cjs
       - run: node web/assets/js/util/traffic-identity.test.cjs
       - run: node --test web/assets/js/util/home-promotion.test.cjs
       - run: go build -o "$RUNNER_TEMP/x-panel" .

@@ -6,6 +6,7 @@ import (
 	"crypto/tls" // 新增：用于 tls.Config
 	"embed"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"html"
@@ -312,25 +313,45 @@ func (t *Tgbot) OnReceive() {
 	botHandler, _ = th.NewBotHandler(bot, updates)
 
 	botHandler.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		telegramInteractionMu.Lock()
+		defer telegramInteractionMu.Unlock()
+		if message.From == nil || !privateTelegramActor(message.Chat, message.From.ID) {
+			return nil
+		}
 		delete(userStates, message.Chat.ID)
+		delete(bindingRequests, message.Chat.ID)
 		t.SendMsgToTgbot(message.Chat.ID, t.I18nBot("tgbot.keyboardClosed"), tu.ReplyKeyboardRemove())
 		return nil
 	}, th.TextEqual(t.I18nBot("tgbot.buttons.closeKeyboard")))
 
 	botHandler.HandleMessage(func(ctx *th.Context, message telego.Message) error {
-		delete(userStates, message.Chat.ID)
 		t.answerCommand(&message, message.Chat.ID, checkAdmin(message.From.ID))
 		return nil
 	}, th.AnyCommand())
 
 	botHandler.HandleCallbackQuery(func(ctx *th.Context, query telego.CallbackQuery) error {
-		delete(userStates, query.Message.GetChat().ID)
 		t.answerCallback(&query, checkAdmin(query.From.ID))
 		return nil
 	}, th.AnyCallbackQueryWithMessage())
 
 	botHandler.HandleMessage(func(ctx *th.Context, message telego.Message) error {
-		if userState, exists := userStates[message.Chat.ID]; exists {
+		telegramInteractionMu.Lock()
+		defer telegramInteractionMu.Unlock()
+		if message.From == nil || !privateTelegramActor(message.Chat, message.From.ID) || !checkAdmin(message.From.ID) {
+			return nil
+		}
+		if message.UsersShared == nil && (wizardOwner != message.From.ID || !time.Now().Before(wizardUntil)) {
+			return nil
+		}
+		if message.UsersShared != nil {
+			pending, ok := bindingRequests[message.From.ID]
+			if !ok || int(pending.id) != message.UsersShared.RequestID || !time.Now().Before(pending.until) {
+				return nil
+			}
+			message.UsersShared.RequestID = pending.client
+			delete(bindingRequests, message.From.ID)
+		}
+		if userState, exists := userStates[message.Chat.ID]; exists && message.UsersShared == nil {
 			switch userState {
 			case "awaiting_id":
 				if client_Id == strings.TrimSpace(message.Text) {
@@ -479,6 +500,13 @@ func (t *Tgbot) OnReceive() {
 }
 
 func (t *Tgbot) answerCommand(message *telego.Message, chatId int64, isAdmin bool) {
+	telegramInteractionMu.Lock()
+	defer telegramInteractionMu.Unlock()
+	if message == nil || message.From == nil || !privateTelegramActor(message.Chat, message.From.ID) || chatId != message.From.ID {
+		return
+	}
+	isAdmin = checkAdmin(message.From.ID)
+	delete(userStates, message.From.ID)
 	msg, onlyMessage := "", false
 
 	command, _, commandArgs := tu.ParseCommand(message.Text)
@@ -609,7 +637,23 @@ func (t *Tgbot) randomShadowSocksPassword() string {
 }
 
 func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool) {
+	telegramInteractionMu.Lock()
+	defer telegramInteractionMu.Unlock()
+	decoded, allowed := t.authorizeCallback(callbackQuery)
+	if !allowed {
+		t.denyCallback(callbackQuery)
+		return
+	}
+	isAdmin = checkAdmin(callbackQuery.From.ID)
+	delete(userStates, callbackQuery.From.ID)
 	chatId := callbackQuery.Message.GetChat().ID
+	copyQuery := *callbackQuery
+	copyQuery.Data = decoded
+	callbackQuery = &copyQuery
+	if !isAdmin && strings.HasPrefix(decoded, "client_get_usage ") {
+		t.getClientUsage(chatId, callbackQuery.From.ID, strings.TrimPrefix(decoded, "client_get_usage "))
+		return
+	}
 
 	if isAdmin {
 		// get query from hash storage
@@ -1283,6 +1327,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 				t.sendCallbackAnswerTgBot(callbackQuery.ID, t.I18nBot("tgbot.answers.getUserInfo", "Email=="+email))
 				t.clientTelegramUserInfo(chatId, email)
 			case "tgid_remove":
+				delete(bindingRequests, chatId)
 				inlineKeyboard := tu.InlineKeyboard(
 					tu.InlineKeyboardRow(
 						tu.InlineKeyboardButton(t.I18nBot("tgbot.buttons.cancel")).WithCallbackData(t.encodeQuery("tgid_cancel "+email)),
@@ -1293,6 +1338,13 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 				)
 				t.editMessageCallbackTgBot(chatId, callbackQuery.Message.GetMessageID(), inlineKeyboard)
 			case "tgid_remove_c":
+				if traffic, err := t.inboundService.GetClientTrafficByEmail(email); err == nil && traffic != nil {
+					for actor, pending := range bindingRequests {
+						if pending.client == traffic.Id {
+							delete(bindingRequests, actor)
+						}
+					}
+				}
 				traffic, err := t.inboundService.GetClientTrafficByEmail(email)
 				if err != nil || traffic == nil {
 					t.sendCallbackAnswerTgBot(callbackQuery.ID, t.I18nBot("tgbot.answers.errorOperation"))
@@ -1649,7 +1701,14 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 		if err != nil {
 			errorMessage := fmt.Sprintf("%v", err)
 			t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.messages.error_add_client", "error=="+errorMessage), tu.ReplyKeyboardRemove())
+			if inbound, e := t.inboundService.GetInbound(receiver_inbound_ID); e == nil {
+				if text, e := t.BuildInboundClientDataMessage(inbound.Remark, inbound.Protocol); e == nil {
+					t.addClient(chatId, text)
+				}
+			}
 		} else {
+			wizardOwner = 0
+			wizardUntil = time.Time{}
 			t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
 			t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.answers.successfulOperation"), tu.ReplyKeyboardRemove())
 		}
@@ -1659,7 +1718,14 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 		if err != nil {
 			errorMessage := fmt.Sprintf("%v", err)
 			t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.messages.error_add_client", "error=="+errorMessage), tu.ReplyKeyboardRemove())
+			if inbound, e := t.inboundService.GetInbound(receiver_inbound_ID); e == nil {
+				if text, e := t.BuildInboundClientDataMessage(inbound.Remark, inbound.Protocol); e == nil {
+					t.addClient(chatId, text)
+				}
+			}
 		} else {
+			wizardOwner = 0
+			wizardUntil = time.Time{}
 			t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
 			t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.answers.successfulOperation"), tu.ReplyKeyboardRemove())
 		}
@@ -2042,9 +2108,12 @@ func (t *Tgbot) SendMsgToTgbot(chatId int64, msg string, replyMarkup ...telego.R
 		}
 		// only add replyMarkup to last message
 		if len(replyMarkup) > 0 && n == (len(allMessages)-1) {
-			params.ReplyMarkup = replyMarkup[0]
+			params.ReplyMarkup = secureKeyboard(chatId, replyMarkup[0])
 		}
-		_, err := bot.SendMessage(context.Background(), &params)
+		sent, err := bot.SendMessage(context.Background(), &params)
+		if err == nil && sent != nil && len(replyMarkup) > 0 {
+			bindKeyboard(chatId, sent.MessageID, params.ReplyMarkup)
+		}
 		if err != nil {
 			logger.Warning("Error sending telegram message :", err)
 		}
@@ -2184,7 +2253,7 @@ func (t *Tgbot) prepareServerUsageInfo() string {
 	return info
 }
 
-func (t *Tgbot) UserLoginNotify(username string, password string, ip string, time string, status LoginStatus) {
+func (t *Tgbot) UserLoginNotify(username string, ip string, time string, status LoginStatus) {
 	if !t.IsRunning() {
 		return
 	}
@@ -2207,7 +2276,6 @@ func (t *Tgbot) UserLoginNotify(username string, password string, ip string, tim
 	case LoginFail:
 		msg += t.I18nBot("tgbot.messages.loginFailed")
 		msg += t.I18nBot("tgbot.messages.hostname", "Hostname=="+hostname)
-		msg += t.I18nBot("tgbot.messages.password", "Password=="+password)
 	}
 	msg += t.I18nBot("tgbot.messages.username", "Username=="+username)
 	msg += t.I18nBot("tgbot.messages.ip", "IP=="+ip)
@@ -2558,8 +2626,14 @@ func (t *Tgbot) clientTelegramUserInfo(chatId int64, email string, messageID ...
 		t.editMessageTgBot(chatId, messageID[0], output, inlineKeyboard)
 	} else {
 		t.SendMsgToTgbot(chatId, output, inlineKeyboard)
+		requestID := int32(binary.BigEndian.Uint32(uuid.New().NodeID()) & 0x7fffffff)
+		bindingRequests[chatId] = struct {
+			id     int32
+			client int
+			until  time.Time
+		}{requestID, traffic.Id, time.Now().Add(20 * time.Minute)}
 		requestUser := telego.KeyboardButtonRequestUsers{
-			RequestID: int32(traffic.Id),
+			RequestID: requestID,
 			UserIsBot: new(bool),
 		}
 		keyboard := tu.Keyboard(
@@ -3064,10 +3138,12 @@ func (t *Tgbot) editMessageCallbackTgBot(chatId int64, messageID int, inlineKeyb
 	params := telego.EditMessageReplyMarkupParams{
 		ChatID:      tu.ID(chatId),
 		MessageID:   messageID,
-		ReplyMarkup: inlineKeyboard,
+		ReplyMarkup: secureKeyboard(chatId, inlineKeyboard).(*telego.InlineKeyboardMarkup),
 	}
 	if _, err := bot.EditMessageReplyMarkup(context.Background(), &params); err != nil {
 		logger.Warning(err)
+	} else {
+		bindKeyboard(chatId, messageID, params.ReplyMarkup)
 	}
 }
 
@@ -3079,10 +3155,12 @@ func (t *Tgbot) editMessageTgBot(chatId int64, messageID int, text string, inlin
 		ParseMode: "HTML",
 	}
 	if len(inlineKeyboard) > 0 {
-		params.ReplyMarkup = inlineKeyboard[0]
+		params.ReplyMarkup = secureKeyboard(chatId, inlineKeyboard[0]).(*telego.InlineKeyboardMarkup)
 	}
 	if _, err := bot.EditMessageText(context.Background(), &params); err != nil {
 		logger.Warning(err)
+	} else if len(inlineKeyboard) > 0 {
+		bindKeyboard(chatId, messageID, params.ReplyMarkup)
 	}
 }
 
@@ -3108,11 +3186,17 @@ func (t *Tgbot) SendMsgToTgbotDeleteAfter(chatId int64, msg string, delayInSecon
 	go func() {
 		time.Sleep(time.Duration(delayInSeconds) * time.Second) // Wait for the specified delay
 		t.deleteMessageTgBot(chatId, sentMsg.MessageID)         // Delete the message
-		delete(userStates, chatId)
 	}()
 }
 
 func (t *Tgbot) deleteMessageTgBot(chatId int64, messageID int) {
+	callbackRegistryMu.Lock()
+	for token, record := range issuedCallbacks {
+		if record.actor == chatId && record.message == messageID {
+			delete(issuedCallbacks, token)
+		}
+	}
+	callbackRegistryMu.Unlock()
 	params := telego.DeleteMessageParams{
 		ChatID:    tu.ID(chatId),
 		MessageID: messageID,

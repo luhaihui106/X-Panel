@@ -68,7 +68,11 @@ func TestBotMenuAndRetiredCallbacks(t *testing.T) {
 	found := map[string]bool{}
 	for _, row := range menu.ReplyMarkup.Rows {
 		for _, button := range row {
-			found[button.Data] = true
+			data := button.Data
+			if issued, ok := issuedCallbacks[data]; ok {
+				data = issued.data
+			}
+			found[data] = true
 		}
 	}
 	for _, retired := range []string{"lottery_play_menu", "vps_recommend", "oneclick_options"} {
@@ -84,8 +88,8 @@ func TestBotMenuAndRetiredCallbacks(t *testing.T) {
 	for _, action := range []string{"lottery_play", "lottery_skip", "lottery_play_menu", "vps_recommend", "oneclick_options", "oneclick_reality", "oneclick_switch_vision"} {
 		before := len(payloads)
 		notifier.answerCallback(&telego.CallbackQuery{ID: "test", Data: action, From: telego.User{ID: 42}, Message: &telego.Message{MessageID: 1, Chat: telego.Chat{ID: 42}}}, true)
-		if len(payloads) != before {
-			t.Fatalf("retired callback still performs action: %s", action)
+		if len(payloads) != before+1 || !strings.Contains(payloads[len(payloads)-1], "Access denied or button expired") {
+			t.Fatalf("retired callback not rejected safely: %s", action)
 		}
 	}
 }
