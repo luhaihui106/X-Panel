@@ -1,4 +1,4 @@
-# 文档索引
+# X-Panel-WH 文档索引
 
 [中文项目入口](../README.md) · [English entry](../README.en.md)
 

@@ -1,4 +1,4 @@
-# X-Panel 社区派生版
+# X-Panel-WH 社区派生版
 
 基于 [xeefei/X-Panel](https://github.com/xeefei/X-Panel) 免费开源版本的小范围下游维护，保留原面板界面与主要功能。不是上游官方发行版或 Pro 产品，也不提供商业授权绕过。
 
@@ -15,10 +15,11 @@
 | 分支 / PR | 用途 |
 | --- | --- |
 | `main` | 旧默认分支，版本文件为 `26.4.25`，**不含上述候选功能** |
-| [`integration/upstream-v26.9.13`](https://github.com/luhaihui106/X-Panel/tree/integration/upstream-v26.9.13) / [draft PR #1](https://github.com/luhaihui106/X-Panel/pull/1) | 未改动的上游免费源码同步 |
-| [`feat/client-monthly-reset`](https://github.com/luhaihui106/X-Panel/tree/feat/client-monthly-reset) / [draft PR #2](https://github.com/luhaihui106/X-Panel/pull/2) | 上游同步之上的下游功能候选 |
+| [`integration/upstream-v26.9.13`](https://github.com/luhaihui106/X-Panel-WH/tree/integration/upstream-v26.9.13) / [draft PR #1](https://github.com/luhaihui106/X-Panel-WH/pull/1) | 未改动的上游免费源码同步 |
+| [`feat/client-monthly-reset`](https://github.com/luhaihui106/X-Panel-WH/tree/feat/client-monthly-reset) / [draft PR #2](https://github.com/luhaihui106/X-Panel-WH/pull/2) | 上游同步之上的下游功能候选 |
+| [`docs/downstream-project-entry`](https://github.com/luhaihui106/X-Panel-WH/tree/docs/downstream-project-entry) / [PR #3](https://github.com/luhaihui106/X-Panel-WH/pull/3) | 本文档与改名后的链接同步，目标为功能分支；尚未更新 `main` 首页 |
 
-本文档记录的候选源码为 `f4f351adef059040cab935492640920e947ba186`，面板版本仍为 `26.9.13`，不是独立正式版本号。核查时本仓库 [Releases](https://github.com/luhaihui106/X-Panel/releases) 为空；既有受控部署或本地交付包不等于公开发行。此文档分支不修改功能分支、部署或包身份。
+本文档记录的候选源码为 `f4f351adef059040cab935492640920e947ba186`，面板版本仍为 `26.9.13`，不是独立正式版本号。核查时本仓库 [Releases](https://github.com/luhaihui106/X-Panel-WH/releases) 为空；既有受控部署或本地交付包不等于公开发行。此文档分支不修改功能分支、部署或包身份。
 
 ## 获取与使用
 

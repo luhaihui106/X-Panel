@@ -74,7 +74,7 @@ Do not dispatch inherited publishing workflows or push version tags.
 The upstream installer can select free/Pro and upstream update scripts can
 replace downstream binaries. Do **not** use upstream auto-update to retain this
 feature. After approval, install only reviewed **free downstream** assets from
-https://github.com/luhaihui106/X-Panel/releases, with a DB backup and verified
+https://github.com/luhaihui106/X-Panel-WH/releases, with a DB backup and verified
 source commit/checksum. No release exists for this draft; installation scripts
 have intentionally not been broadly rewritten or executed.
 

@@ -5,8 +5,8 @@
 需要 Git、Go 1.27（以 `go.mod` 为准）、本机 C 编译器/开发工具和启用 CGO 的 SQLite；Node 22 用于前端回归。以下仅构建/测试，不安装服务，不获取生产数据。选择新目录，固定候选而非随分支漂移：
 
 ```sh
-git clone --branch feat/client-monthly-reset https://github.com/luhaihui106/X-Panel.git X-Panel-candidate
-cd X-Panel-candidate
+git clone --branch feat/client-monthly-reset https://github.com/luhaihui106/X-Panel-WH.git X-Panel-WH-candidate
+cd X-Panel-WH-candidate
 git checkout --detach f4f351adef059040cab935492640920e947ba186
 git rev-parse HEAD
 go version

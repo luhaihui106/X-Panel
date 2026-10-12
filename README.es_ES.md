@@ -1,4 +1,4 @@
-# X-Panel community downstream / 社区派生版
+# X-Panel-WH community downstream / 社区派生版
 
 [中文主入口](README.md) · [English entry](README.en.md) · [文档 / Documentation](docs/README.md) · [License](LICENSE) · [Credits](docs/credits.md)
 
