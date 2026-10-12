@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,7 +19,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"context"
 
 	"x-ui/config"
 	"x-ui/database"
@@ -141,6 +141,11 @@ func getPublicIP(url string) string {
 }
 
 func (s *ServerService) GetStatus(lastStatus *Status) *Status {
+	return s.getStatus(lastStatus, true)
+}
+
+// getStatus can skip public-IP discovery for offline administrator reports.
+func (s *ServerService) getStatus(lastStatus *Status, discoverPublicIP bool) *Status {
 	now := time.Now()
 	status := &Status{
 		T: now,
@@ -244,47 +249,49 @@ func (s *ServerService) GetStatus(lastStatus *Status) *Status {
 		logger.Warning("get udp connections failed:", err)
 	}
 
-	// IP fetching with caching
-	showIp4ServiceLists := []string{
-		"https://api4.ipify.org",
-		"https://ipv4.icanhazip.com",
-		"https://v4.api.ipinfo.io/ip",
-		"https://ipv4.myexternalip.com/raw",
-		"https://4.ident.me",
-		"https://check-host.net/ip",
-	}
-	showIp6ServiceLists := []string{
-		"https://api6.ipify.org",
-		"https://ipv6.icanhazip.com",
-		"https://v6.api.ipinfo.io/ip",
-		"https://ipv6.myexternalip.com/raw",
-		"https://6.ident.me",
-	}
+	if discoverPublicIP {
+		// IP fetching with caching
+		showIp4ServiceLists := []string{
+			"https://api4.ipify.org",
+			"https://ipv4.icanhazip.com",
+			"https://v4.api.ipinfo.io/ip",
+			"https://ipv4.myexternalip.com/raw",
+			"https://4.ident.me",
+			"https://check-host.net/ip",
+		}
+		showIp6ServiceLists := []string{
+			"https://api6.ipify.org",
+			"https://ipv6.icanhazip.com",
+			"https://v6.api.ipinfo.io/ip",
+			"https://ipv6.myexternalip.com/raw",
+			"https://6.ident.me",
+		}
 
-	if s.cachedIPv4 == "" {
-		for _, ip4Service := range showIp4ServiceLists {
-			s.cachedIPv4 = getPublicIP(ip4Service)
-			if s.cachedIPv4 != "N/A" {
-				break
+		if s.cachedIPv4 == "" {
+			for _, ip4Service := range showIp4ServiceLists {
+				s.cachedIPv4 = getPublicIP(ip4Service)
+				if s.cachedIPv4 != "N/A" {
+					break
+				}
 			}
 		}
-	}
 
-	if s.cachedIPv6 == "" && !s.noIPv6 {
-		for _, ip6Service := range showIp6ServiceLists {
-			s.cachedIPv6 = getPublicIP(ip6Service)
-			if s.cachedIPv6 != "N/A" {
-				break
+		if s.cachedIPv6 == "" && !s.noIPv6 {
+			for _, ip6Service := range showIp6ServiceLists {
+				s.cachedIPv6 = getPublicIP(ip6Service)
+				if s.cachedIPv6 != "N/A" {
+					break
+				}
 			}
 		}
-	}
 
-	if s.cachedIPv6 == "N/A" {
-		s.noIPv6 = true
-	}
+		if s.cachedIPv6 == "N/A" {
+			s.noIPv6 = true
+		}
 
-	status.PublicIP.IPv4 = s.cachedIPv4
-	status.PublicIP.IPv6 = s.cachedIPv6
+		status.PublicIP.IPv4 = s.cachedIPv4
+		status.PublicIP.IPv6 = s.cachedIPv6
+	}
 
 	// Xray status
 	if s.xrayService.IsXrayRunning() {
@@ -365,7 +372,7 @@ func (s *ServerService) GetXrayVersions() ([]string, error) {
 			continue
 		}
 
-                                  if major > 26 || (major == 26 && minor > 2) || (major == 26 && minor == 2 && patch >= 6) {
+		if major > 26 || (major == 26 && minor > 2) || (major == 26 && minor == 2 && patch >= 6) {
 			versions = append(versions, release.TagName)
 		}
 	}
@@ -949,7 +956,7 @@ func (s *ServerService) GetNewX25519Cert() (any, error) {
 
 	keyPair := map[string]any{
 		"privateKey": privateKey,
-		"publicKey": publicKey, // 修复：U+00A0 替换为标准空格
+		"publicKey":  publicKey, // 修复：U+00A0 替换为标准空格
 	}
 
 	return keyPair, nil
@@ -1113,20 +1120,20 @@ func (s *ServerService) LoadLinkHistory() ([]*database.LinkHistory, error) {
 func (s *ServerService) InstallSubconverter() error {
 	// 〔中文注释〕: 使用一个新的 goroutine 来执行耗时的安装任务，这样 API 可以立即返回
 	go func() {
-        
-        // 【新增功能】：执行端口放行操作
-        var ufwWarning string
-        if ufwErr := s.openSubconverterPorts(); ufwErr != nil {
-            // 不中断流程，只生成警告消息
-            logger.Warningf("自动放行 Subconverter 端口失败: %v", ufwErr)
-            ufwWarning = fmt.Sprintf("⚠️ **警告：订阅转换端口放行失败**\n\n自动执行 UFW 命令失败，请务必**手动**在您的 VPS 上放行端口 `8000` 和 `15268`，否则服务将无法访问。失败详情：%v\n\n", ufwErr)
-        }
+
+		// 【新增功能】：执行端口放行操作
+		var ufwWarning string
+		if ufwErr := s.openSubconverterPorts(); ufwErr != nil {
+			// 不中断流程，只生成警告消息
+			logger.Warningf("自动放行 Subconverter 端口失败: %v", ufwErr)
+			ufwWarning = fmt.Sprintf("⚠️ **警告：订阅转换端口放行失败**\n\n自动执行 UFW 命令失败，请务必**手动**在您的 VPS 上放行端口 `8000` 和 `15268`，否则服务将无法访问。失败详情：%v\n\n", ufwErr)
+		}
 
 		// 〔中文注释〕: 检查全局的 TgBot 实例是否存在并且正在运行
 		if s.tgService == nil || !s.tgService.IsRunning() {
 			logger.Warning("TgBot 未运行，无法发送【订阅转换】状态通知。")
 			// 即使机器人未运行，安装流程也应继续，只是不发通知
-            ufwWarning = "" // 如果机器人不在线，不发送任何警告/消息
+			ufwWarning = "" // 如果机器人不在线，不发送任何警告/消息
 		}
 
 		// 脚本路径为 /usr/bin/x-ui
@@ -1161,11 +1168,11 @@ func (s *ServerService) InstallSubconverter() error {
 			logger.Errorf("订阅转换安装失败: %v\n输出: %s", err, string(output))
 			return
 		} else {
-            
-            // 【新增逻辑】：如果之前端口放行失败，先发送警告消息
-            if ufwWarning != "" {
-                s.tgService.SendMessage(ufwWarning)
-            }
+
+			// 【新增逻辑】：如果之前端口放行失败，先发送警告消息
+			if ufwWarning != "" {
+				s.tgService.SendMessage(ufwWarning)
+			}
 
 			// 安装成功后，发送通知到 TG 机器人
 			if s.tgService != nil && s.tgService.IsRunning() {
@@ -1257,22 +1264,21 @@ func (s *ServerService) openSubconverterPorts() error {
     exit 0
 	`
 
-    // 使用 /bin/bash -c 执行命令，并捕获输出
+	// 使用 /bin/bash -c 执行命令，并捕获输出
 	cmd := exec.CommandContext(context.Background(), "/bin/bash", "-c", shellCommand)
 	output, err := cmd.CombinedOutput()
 	logOutput := string(output)
-	
+
 	// 记录日志，无论成功与否
 	logger.Infof("执行 Subconverter 端口放行命令结果:\n%s", logOutput)
 
 	if err != nil {
-        // 如果 Shell 命令返回非零退出码，则返回错误
+		// 如果 Shell 命令返回非零退出码，则返回错误
 		return fmt.Errorf("ufw 端口放行失败: %v. 脚本输出: %s", err, logOutput)
 	}
 
 	return nil
 }
-
 
 // 【新增方法实现】: 后台前端开放指定端口
 // OpenPort 供前端调用，自动检查/安装 ufw 并放行指定的端口。
@@ -1374,7 +1380,7 @@ func (s *ServerService) RestartPanel() error {
 		logger.Error(errMsg)
 		return fmt.Errorf(errMsg)
 	}
-	
+
 	// 〔中文注释〕: 定义要执行的命令和参数。
 	cmd := exec.Command(scriptPath, "restart")
 

@@ -3,28 +3,23 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls" // 新增：用于 tls.Config
 	"embed"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"math/big"
 	"net"
+	"net/http" // 新增：用于 http.Client / Transport
 	"net/url"
 	"os"
+	"os/exec"       // 新增：用于 exec.Command（getDomain 等）
+	"path/filepath" // 新增：用于 filepath.Base / Dir（getDomain 用到）
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
-	"encoding/json"    // 新增：用于 json.Marshal / Unmarshal
-    "net/http"         // 新增：用于 http.Client / Transport
-    "crypto/tls"       // 新增：用于 tls.Config
-    "os/exec"          // 新增：用于 exec.Command（getDomain 等）
-    "path/filepath"    // 新增：用于 filepath.Base / Dir（getDomain 用到）
-	"io/ioutil" // 〔中文注释〕: 新增，用于读取 HTTP API 响应体。
-	rng "math/rand"    // 用于随机排列
-	"encoding/xml"   // 【新增】: 用于直接解析 RSS XML 响应体
-	"crypto/sha256"
-	"encoding/hex"
 
 	"x-ui/config"
 	"x-ui/database"
@@ -43,7 +38,6 @@ import (
 	"github.com/valyala/fasthttp/fasthttpproxy"
 )
 
-
 // 〔中文注释〕: 新增 TelegramService 接口，用于解耦 Job 和 Telegram Bot 的直接依赖。
 // 任何实现了 SendMessage(msg string) error 方法的结构体，都可以被认为是 TelegramService。
 type TelegramService interface {
@@ -54,7 +48,7 @@ type TelegramService interface {
 	// 〔中文注释〕: 将 SendOneClickConfig 方法添加到接口中，这样其他服务可以通过接口来调用它，
 	// 实现了与具体实现 Tgbot 的解耦。
 	// 新增 GetDomain 方法签名，以满足 server.go 的调用需求
-    GetDomain() (string, error)
+	GetDomain() (string, error)
 }
 
 var (
@@ -86,17 +80,6 @@ var (
 
 var userStates = make(map[int64]string)
 
-// 〔中文注释〕: 贴纸的发送顺序将在运行时被随机打乱。
-var LOTTERY_STICKER_IDS = [3]string{
-	// STICKER_ID_1: 官方 Telegram Loading 动画 (经典)
-	"CAACAgIAAxkBAAIDxWX-R5hGfI9xXb6Q-iJ2XG8275TfAAI-BQACx0LhSb86q20xK0-rMwQ", 
-	// STICKER_ID_2: 官方 Telegram 思考/忙碌动画
-	"CAACAgIAAxkBAAIBv2X3F9c_pS8i0tF5N0Q-vF0Jc-oUAAJPAgACVwJpS2rN0xV8dFm2MwQ",
-	// STICKER_ID_3: 官方 Telegram 进度条动画
-	"CAACAgIAAxkBAAIB2GX3GNmXz18D2c9S-vF1X8X8ZgU9AALBAQACVwJpS_jH35KkK3y3MwQ",
-}
-
-
 type LoginStatus byte
 
 const (
@@ -108,9 +91,9 @@ const (
 type Tgbot struct {
 	inboundService *InboundService
 	settingService *SettingService
-	serverService *ServerService
-	xrayService *XrayService
-	lastStatus *Status
+	serverService  *ServerService
+	xrayService    *XrayService
+	lastStatus     *Status
 }
 
 // 【新增方法】: 用于从外部注入 ServerService 实例
@@ -220,7 +203,6 @@ func (t *Tgbot) Start(i18nFS embed.FS) error {
 			{Command: "help", Description: t.I18nBot("tgbot.commands.helpDesc")},
 			{Command: "status", Description: t.I18nBot("tgbot.commands.statusDesc")},
 			{Command: "id", Description: t.I18nBot("tgbot.commands.idDesc")},
-			{Command: "oneclick", Description: "🚀 一键配置节点 (有可选项)"},
 			{Command: "subconverter", Description: "🔄 检测或安装订阅转换"},
 			{Command: "restartx", Description: "♻️ 重启〔X-Panel 面板〕"},
 		},
@@ -562,15 +544,6 @@ func (t *Tgbot) answerCommand(message *telego.Message, chatId int64, isAdmin boo
 		} else {
 			handleUnknownCommand()
 		}
-	// 【新增代码】: 处理 /oneclick 指令
-	case "oneclick":
-		onlyMessage = true
-		if isAdmin {
-			t.SendMsgToTgbot(chatId, "〔一键配置〕功能现已升级为“付费Pro版”专属功能，\n\n请联系面板管理员〔购买授权码〕之后才能继续使用，\n\n----->>> “授权码购买”机器人：@Buy_ShouQuan_Bot")
-		} else {
-			handleUnknownCommand()
-		}
-
 	// 【新增代码】: 处理 /subconverter 指令
 	case "subconverter":
 		onlyMessage = true
@@ -597,7 +570,7 @@ func (t *Tgbot) answerCommand(message *telego.Message, chatId int64, isAdmin boo
 			t.SendMsgToTgbot(chatId, "🤔 您“现在的操作”是要确定进行，\n\n重启〔X-Panel 面板〕服务吗？\n\n这也会同时重启 Xray Core，\n\n会使面板在短时间内无法访问。", confirmKeyboard)
 		} else {
 			handleUnknownCommand()
-		}	
+		}
 	default:
 		handleUnknownCommand()
 	}
@@ -1736,7 +1709,7 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 			t.SendMsgToTgbot(chatId, t.I18nBot("tgbot.answers.errorOperation"), tu.ReplyKeyboardRemove())
 			return
 		}
-		
+
 		for _, valid_emails := range valid_emails {
 			traffic, err := t.inboundService.GetClientTrafficByEmail(valid_emails)
 			if err != nil {
@@ -1760,163 +1733,24 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 
 		}
 
-	// 〔中文注释〕: 新增 - 处理用户点击 "玩" 抽奖游戏
-	case "lottery_play":
-		
-		// 确保本次 Shuffle 是随机的。
-		rng.Seed(time.Now().UnixNano()) 
-		chatId := callbackQuery.Message.GetChat().ID // 【确保 chatId 在函数开始时被初始化】
-		messageId := callbackQuery.Message.GetMessageID() // 获取原消息 ID
-		
-		// 〔中文注释〕: 首先，回应 TG 的回调请求，告诉用户机器人已收到操作。
-		t.sendCallbackAnswerTgBot(callbackQuery.ID, "〔X-Panel 小白哥〕正在为您摇奖，请稍后......")
-		
-		// 这条消息会永久停留在聊天窗口，作为等待提示。
-		t.editMessageTgBot(
-			chatId,
-			messageId,
-			"⏳ **抽奖结果生成中...**\n\n------->>>请耐心等待 5 秒......\n\n〔X-Panel 小白哥〕马上为您揭晓！",
-			// 【关键】: 不传入键盘参数，自动移除旧键盘
-		)
+	case "subconverter_install":
+		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
+		t.sendCallbackAnswerTgBot(callbackQuery.ID, "🔄 正在检查服务...")
+		t.checkAndInstallSubconverter(chatId)
 
-		// --- 【发送动态贴纸（实现随机、容错、不中断）】 ---
-		var stickerMessageID int // 用于存储成功发送的贴纸消息 ID
-		
-        // 〔中文注释〕: 1. 将数组转换为可操作的切片
-		stickerIDsSlice := LOTTERY_STICKER_IDS[:] 
-
-		// 〔中文注释〕: 2. 随机化贴纸的发送顺序，确保每次动画不同。
-		// 注意: 依赖于文件头部导入的 rng "math/rand"
-		rng.Shuffle(len(stickerIDsSlice), func(i, j int) {
-			stickerIDsSlice[i], stickerIDsSlice[j] = stickerIDsSlice[j], stickerIDsSlice[i]
-		})
-        
-		// 〔中文注释〕: 3. 遍历随机化后的贴纸 ID，尝试发送，直到成功为止。
-		for _, stickerID := range stickerIDsSlice {
-			stickerMessage, err := t.SendStickerToTgbot(chatId, stickerID)
-			if err == nil {
-				// 成功发送，记录 ID 并跳出循环。
-				stickerMessageID = stickerMessage.MessageID
-				break
-			}
-			// 如果失败，记录日志并尝试下一个 ID。
-			logger.Warningf("尝试发送贴纸 %s 失败: %v", stickerID, err)
-		}
-		
-		// 【保持】: 程序在此处暂停 5 秒，用户可以看到动画。
-		time.Sleep(5000 * time.Millisecond)
-		
-		// 【新增：5秒后，删除动画贴纸】
-		if stickerMessageID != 0 {
-			// 〔中文注释〕: 抽奖结束后，删除刚才成功发送的动态贴纸消息。
-			t.deleteMessageTgBot(chatId, stickerMessageID)
-		}
-    
-        // 程序将在 5 秒后，继续执行下面的逻辑：
-		userID := callbackQuery.From.ID
-
-		// --- 【新增】: 获取用户信息，用于防伪 ---
-		user := callbackQuery.From
-		// 优先使用 Username，如果没有则使用 FirstName
-		userInfo := user.FirstName
-		if user.Username != "" {
-			userInfo = "@" + user.Username
+	case "confirm_sub_install":
+		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
+		t.sendCallbackAnswerTgBot(callbackQuery.ID, "✅ 指令已发送")
+		t.SendMsgToTgbot(chatId, "【订阅转换】模块正在后台安装，大约需要1-2分钟，完成后将再次通知您。")
+		err := t.serverService.InstallSubconverter()
+		if err != nil {
+			t.SendMsgToTgbot(chatId, fmt.Sprintf("发送安装指令失败: %v", err))
 		}
 
-		
-		// 〔中文注释〕: 检查用户今天是否已经中过奖 (调用您在 database 中实现的函数)。
-		hasWon, err := database.HasUserWonToday(userID)
-		    if err != nil {
-				logger.Warningf("查询用户 %d 中奖记录失败: %v", userID, err)
-				t.editMessageTgBot(chatId, callbackQuery.Message.GetMessageID(), "抱歉，抽奖数据库查询失败，请联系管理员。")
-				return
-			}
-
-			if hasWon {
-				// 〔中文注释〕: 如果已经中奖，则告知用户并结束。
-				t.editMessageTgBot(chatId, callbackQuery.Message.GetMessageID(), "您今天已经中过奖啦，请明天再来！\n\n机会还多的是，贪心可是不好的哦~")
-				return
-			}
-
-			// 〔中文注释〕: 执行抽奖逻辑。
-			prize, resultMessage := t.runLotteryDraw()
-
-			// 〔中文注释〕: 如果中奖了（不是 "未中奖" 或 "错误"）。
-			if prize != "未中奖" && prize != "错误" {
-
-			// --- 【新增】: 获取当前时间并格式化 ---
-			winningTime := time.Now().Format("2006-01-02 15:04:05")	
-				
-			// --- 【新增】: 生成防伪校验哈希 ---
-			// 1. 组合所有关键信息：UserID + Prize + WinningTime
-			//    注意：使用 prize 而不是 resultMessage，因为 prize 是干净的奖项名称。
-			dataToHash := strconv.FormatInt(user.ID, 10) + "|" + prize + "|" + winningTime
-			
-			// 2. 计算 SHA256 哈希值
-			hasher := sha256.New()
-			hasher.Write([]byte(dataToHash))
-			// 3. 转换为 16 进制字符串（方便显示）
-			validationHash := hex.EncodeToString(hasher.Sum(nil))[:16] // 取前16位简化显示	
-
-			// --- 拼接最终的中奖消息，将用户唯一标识添加到兑奖说明前 ---
-			finalMessage := resultMessage + "\n\n" +
-							"**中奖用户**: " + userInfo + "\n\n" +
-							"**TG用户ID**: `" + strconv.FormatInt(user.ID, 10) + "`\n\n" +
-				            "**中奖时间**: " + winningTime + "\n\n" +
-				            "**防伪码 (Hash)**: `" + validationHash + "`\n\n" +
-							"**兑奖说明**：请截图此完整消息，\n\n" +
-							"并联系交流群内管理员进行兑奖。\n\n" +
-							"------------->>>>〔X-Panel 面板〕交流群：\n\n" +
-							"------------->>>> https://t.me/XUI_CN"
-
-			// 〔中文注释〕: 记录中奖结果 (调用在 database 中实现的函数)。
-			err := database.RecordUserWin(userID, prize)
-			if err != nil {
-				logger.Warningf("记录用户 %d 中奖信息失败: %v", userID, err)
-				// 〔中文注释〕: 即使记录失败，也要告知用户中奖了，但提示管理员后台可能出错了。
-				finalMessage += "\n\n(后台警告：数据库记录失败，请管理员手动核实给予兑奖)"
-			}
-			// 〔中文注释〕: 编辑原消息，显示最终的中奖结果。
-				t.editMessageTgBot(chatId, callbackQuery.Message.GetMessageID(), finalMessage)
-			} else {
-				// 〔中文注释〕: 如果未中奖或抽奖出错，则直接显示相应信息。
-				t.editMessageTgBot(chatId, callbackQuery.Message.GetMessageID(), resultMessage)
-
-			}
-			return // 〔中文注释〕: 处理完毕，直接返回，避免执行后续逻辑。
-
-	 // 〔中文注释〕: 新增 - 处理用户点击 "不玩" 抽奖游戏
-	 case "lottery_skip":
-			// 〔中文注释〕: 回应回调请求。
-			t.sendCallbackAnswerTgBot(callbackQuery.ID, "您已跳过游戏。")
-			// 〔中文注释〕: 编辑原消息，移除按钮并显示友好提示。
-			t.editMessageTgBot(chatId, callbackQuery.Message.GetMessageID(), "您选择不参与本次游戏，祝您一天愉快！")
-			return // 〔中文注释〕: 处理完毕，直接返回。	
-
-	 // 【新增代码】: 在这里处理新按钮的回调
-	 case "oneclick_options":
-		 t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		 t.sendCallbackAnswerTgBot(callbackQuery.ID, "功能升级提示......")
-		 t.SendMsgToTgbot(chatId, "〔一键配置〕功能现已升级为“付费Pro版”专属功能，\n\n请联系面板管理员〔购买授权码〕之后才能继续使用，\n\n----->>> “授权码购买”机器人：@Buy_ShouQuan_Bot")
-
-	 case "subconverter_install":
-		 t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		 t.sendCallbackAnswerTgBot(callbackQuery.ID, "🔄 正在检查服务...")
-		 t.checkAndInstallSubconverter(chatId)
-
-	 case "confirm_sub_install":
-		 t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		 t.sendCallbackAnswerTgBot(callbackQuery.ID, "✅ 指令已发送")
-		 t.SendMsgToTgbot(chatId, "【订阅转换】模块正在后台安装，大约需要1-2分钟，完成后将再次通知您。")
-		    err := t.serverService.InstallSubconverter()
-			if err != nil {
-				t.SendMsgToTgbot(chatId, fmt.Sprintf("发送安装指令失败: %v", err))
-			}
-
-	 case "cancel_sub_install":
-		 t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		 t.sendCallbackAnswerTgBot(callbackQuery.ID, "已取消")
-		 t.SendMsgToTgbot(chatId, "已取消【订阅转换】安装操作。")
+	case "cancel_sub_install":
+		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
+		t.sendCallbackAnswerTgBot(callbackQuery.ID, "已取消")
+		t.SendMsgToTgbot(chatId, "已取消【订阅转换】安装操作。")
 	// 〔中文注释〕: 【新增回调处理】 - 重启面板、娱乐抽奖、VPS推荐
 	case "restart_panel":
 		// 〔中文注释〕: 用户从菜单点击重启，删除主菜单并发送确认消息
@@ -1959,55 +1793,6 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 		// 〔中文注释〕: 发送一个临时消息提示用户，3秒后自动删除
 		t.SendMsgToTgbotDeleteAfter(chatId, "已取消重启操作。", 3)
 
-	case "lottery_play_menu":
-		// 〔中文注释〕: 从菜单触发抽奖，复用现有逻辑
-		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		t.sendCallbackAnswerTgBot(callbackQuery.ID, "正在准备游戏......")
-		// 〔中文注释〕: 直接调用您代码中已有的 sendLotteryGameInvitation 函数即可
-		t.sendLotteryGameInvitation()
-
-	case "vps_recommend":
-		// 〔中文注释〕: 发送您指定的VPS推荐信息
-		t.deleteMessageTgBot(chatId, callbackQuery.Message.GetMessageID())
-		t.sendCallbackAnswerTgBot(callbackQuery.ID, "请查看VPS推荐列表")
-		vpsMessage := `✰若需要购买VPS，以下可供选择（包含AFF）✰
-
-1、搬瓦工GIA高端线路，仅推荐购买GIA套餐：
-https://bandwagonhost.com/aff.php?aff=75015
-
-2、Dmit高端GIA线路：
-https://www.dmit.io/aff.php?aff=9326
-
-3、Gomami亚太顶尖优化线路：
-https://gomami.io/aff.php?aff=174
-
-4、ISIF优质亚太优化线路：
-https://cloud.isif.net/login?affiliation_code=333
-
-5、ZoroCloud全球优质原生家宽&住宅双lSP，跨境首选：
-https://my.zorocloud.com/aff.php?aff=1072
-
-6、三网直连 IEPL / IPLC 直播流量转发：
-https://idc333.top/#register/BCUZXNELNO
-
-7、Bagevm优质落地鸡（原生IP全解锁）：
-https://www.bagevm.com/aff.php?aff=754
-
-8、白丝云【4837线路】实惠量大管饱：
-https://cloudsilk.io/aff.php?aff=706
-
-9、RackNerd极致性价比机器：
-https://my.racknerd.com/aff.php?aff=15268&pid=912`
-		// 〔中文注释〕: 发送消息时禁用链接预览，使界面更整洁
-		params := tu.Message(
-			tu.ID(chatId),
-			vpsMessage,
-		).WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})
-
-		_, err := bot.SendMessage(context.Background(), params)
-		if err != nil {
-			logger.Warning("发送VPS推荐消息失败:", err)
-		}	
 	}
 }
 
@@ -2197,13 +1982,7 @@ func (t *Tgbot) SendAnswer(chatId int64, msg string, isAdmin bool) {
 		),
 		// 【一键配置】和【订阅转换】按钮的回调数据
 		tu.InlineKeyboardRow(
-			tu.InlineKeyboardButton(t.I18nBot("tgbot.buttons.oneClick")).WithCallbackData(t.encodeQuery("oneclick_options")),
 			tu.InlineKeyboardButton(t.I18nBot("tgbot.buttons.subconverter")).WithCallbackData(t.encodeQuery("subconverter_install")),
-		),
-		// 〔中文注释〕: 【新增功能行】 - 添加娱乐抽奖和VPS推荐按钮
-		tu.InlineKeyboardRow(
-			tu.InlineKeyboardButton("🎁 娱乐抽奖").WithCallbackData(t.encodeQuery("lottery_play_menu")),
-			tu.InlineKeyboardButton("🛰️ VPS 推荐").WithCallbackData(t.encodeQuery("vps_recommend")),
 		),
 		// TODOOOOOOOOOOOOOO: Add restart button here.
 	)
@@ -2285,112 +2064,36 @@ func (t *Tgbot) SendMsgToTgbotAdmins(msg string, replyMarkup ...telego.ReplyMark
 	}
 }
 
-// 〔中文注释〕: 全新重构的 SendReport 函数，只发送四条趣味性内容。
+// SendReport sends one local operations summary per configured administrator.
 func (t *Tgbot) SendReport() {
-
-	// --- 第一条消息：发送问候与时间 (顺序 1) ---
-    // 修正：确保任务名称即使为空也能发送消息
-	runTime, _ := t.settingService.GetTgbotRuntime() 
-    taskName := runTime
-    if taskName == "" {
-        taskName = "未配置任务名称" // 使用占位符，避免因空值跳过
-    }
-
-	greetingMsg := fmt.Sprintf(
-		"☀️ **每日定时报告** (任务: `%s`)\n\n*  美好的一天，从〔X-Panel 面板〕开始！*\n\n⏰ **当前时间**：`%s`",
-		taskName,
-		time.Now().Format("2006-01-02 15:04:05"),
-	)
-	t.SendMsgToTgbotAdmins(greetingMsg) 
-	time.Sleep(1000 * time.Millisecond)
-
-	// --- 第二条消息：每日一语（最终稳定版） (顺序 2) ---
-	if verse, err := t.getDailyVerse(); err == nil {
-		t.SendMsgToTgbotAdmins(verse)
-	} else {
-		// 即使失败，也记录日志，不影响后续发送
-		logger.Warningf("获取每日诗词失败: %v", err)
-	}
-	time.Sleep(1000 * time.Millisecond)
-
-	// --- 第三条消息：今日美图（三重冗余，已修复） (顺序 3) ---
-	t.sendRandomImageWithFallback()
-	time.Sleep(1000 * time.Millisecond)
-
-	// --- 第四条消息：新闻资讯简报（最终稳定版：中文 IT/AI/币圈） (顺序 4) ---
-	if news, err := t.getNewsBriefingWithFallback(); err == nil {
-		t.SendMsgToTgbotAdmins(news)
-	} else {
-		// 即使失败，也记录日志，不影响发送流程结束
-		logger.Warningf("获取所有新闻资讯失败: %v", err)
-	}
-	// 〔中文注释〕: 【新增】为下一条消息添加延时
-	time.Sleep(1000 * time.Millisecond)
-
-	// --- 【新增】第五条消息：发送抽奖游戏邀请 (顺序 5) ---
-	t.sendLotteryGameInvitation()
-}
-
-// 〔中文注释〕: 新增函数，执行抽奖逻辑并返回结果。
-func (t *Tgbot) runLotteryDraw() (prize string, message string) {
-	// 〔中文注释〕: 使用 crypto/rand 生成一个 0-999 的安全随机数，确保公平性。
-	n, err := rand.Int(rand.Reader, big.NewInt(1000))
-    if err != nil {
-        logger.Warningf("生成抽奖随机数失败: %v", err)
-        // 〔中文注释〕: 如果安全随机数生成失败，返回一个错误提示，避免继续执行。
-        return "错误", "抽奖系统暂时出现问题，请联系管理员。"
-    }
-	roll := n.Int64()
-
-	// 〔中文注释〕: 设置不同奖项的中奖概率。总中奖概率：3%+8%+12%+20%=43% 。
-	// 一等奖: 30/1000 (3%)
-	if roll < 30 {
-		prize = "一等奖"
-		message = "🎉 **天选之人！恭喜您抽中【一等奖】！** 🎉\n\n请联系管理员兑换神秘大奖！"
+	if !t.IsRunning() {
 		return
 	}
-	// 二等奖: 80/1000 (8%)，累计上限 110
-	if roll < 110 {
-		prize = "二等奖"
-		message = "🎊 **欧气满满！恭喜您抽中【二等奖】！** 🎊\n\n请联系管理员兑换牛逼奖品！"
-		return
+	settings := t.settingService
+	if settings == nil {
+		settings = &SettingService{}
 	}
-	// 三等奖: 120/1000 (12%)，累计上限 230
-	if roll < 230 {
-		prize = "三等奖"
-		message = "🎁 **运气不错！恭喜您抽中【三等奖】！** 🎁\n\n请联系管理员兑换小惊喜！"
-		return
+	location, err := settings.GetTimeLocation()
+	if err != nil || location == nil {
+		location = time.Local
 	}
-	// 安慰奖: 200/1000 (20%)，累计上限 430
-	if roll < 430 {
-		prize = "安慰奖"
-		message = "👍 **重在参与！恭喜您抽中【安慰奖】！** 👍\n\n请联系管理员兑换鼓励奖！"
-		return
+	server := t.serverService
+	if server == nil {
+		server = &ServerService{}
 	}
-
-	// 〔中文注释〕: 如果未中任何奖项。未中奖概率 57% 。
-	prize = "未中奖"
-	message = "😕 **谢谢参与**倒霉的宝子。\n\n很遗憾，本次您未中奖，明天再来试试吧！"
-	return
-}
-
-// 〔中文注释〕: 新增函数，用于发送抽奖游戏邀请。
-func (t *Tgbot) sendLotteryGameInvitation() {
-	// 〔中文注释〕: 构建邀请消息和内联键盘。
-	msg := "-------🎉 福利区 🎉-------\n\n✨ **每日幸运抽奖游戏**\n\n-->您想试试今天的手气吗？"
-
-	// 〔中文注释〕: "lottery_play" 和 "lottery_skip" 将作为回调数据，用于后续处理。
-	inlineKeyboard := tu.InlineKeyboard(
-		tu.InlineKeyboardRow(
-			tu.InlineKeyboardButton("🤩玩，我要赢奖品/萝莉！！！").WithCallbackData(t.encodeQuery("lottery_play")),
-		),
-		tu.InlineKeyboardRow(
-			tu.InlineKeyboardButton("❌劳资不玩，我要看美图......").WithCallbackData(t.encodeQuery("lottery_skip")),
-		),
-	)
-
-	// 〔中文注释〕: 将带键盘的消息发送给所有管理员。
-	t.SendMsgToTgbotAdmins(msg, inlineKeyboard)
+	status := server.getStatus(nil, false)
+	host, err := os.Hostname()
+	if err != nil {
+		host = "不可用"
+	}
+	msg := fmt.Sprintf("<b>管理员运营摘要</b>\n时间：%s（时区：%s）\n主机：%s\n面板版本：%s\n服务器状态：运行时长 %s；CPU %.1f%%\n内存：%s / %s\n磁盘：%s / %s\nTCP / UDP：%d / %d\n主机累计网络流量：上传 %s；下载 %s\nXray 状态：%s；版本：%s",
+		time.Now().In(location).Format("2006-01-02 15:04:05 MST -0700"), html.EscapeString(location.String()),
+		html.EscapeString(host), html.EscapeString(config.GetVersion()), time.Duration(status.Uptime)*time.Second,
+		status.Cpu, common.FormatTraffic(int64(status.Mem.Current)), common.FormatTraffic(int64(status.Mem.Total)),
+		common.FormatTraffic(int64(status.Disk.Current)), common.FormatTraffic(int64(status.Disk.Total)),
+		status.TcpCount, status.UdpCount, common.FormatTraffic(int64(status.NetTraffic.Sent)),
+		common.FormatTraffic(int64(status.NetTraffic.Recv)), html.EscapeString(string(status.Xray.State)), html.EscapeString(status.Xray.Version))
+	t.SendMsgToTgbotAdmins(msg)
 }
 
 func (t *Tgbot) SendBackupToAdmins() {
@@ -3431,13 +3134,13 @@ func (t *Tgbot) isSingleWord(text string) bool {
 // 当设备限制任务需要发送消息时，会调用此方法。
 // 该方法内部调用了已有的 SendMsgToTgbotAdmins 函数，将消息发送给所有管理员。
 func (t *Tgbot) SendMessage(msg string) error {
-    if !t.IsRunning() {
-        // 〔中文注释〕: 如果 Bot 未运行，返回错误，防止程序出错。
-        return errors.New("Telegram bot is not running")
-    }
-    // 〔中文注释〕: 调用现有方法将消息发送给所有已配置的管理员。
-    t.SendMsgToTgbotAdmins(msg)
-    return nil
+	if !t.IsRunning() {
+		// 〔中文注释〕: 如果 Bot 未运行，返回错误，防止程序出错。
+		return errors.New("Telegram bot is not running")
+	}
+	// 〔中文注释〕: 调用现有方法将消息发送给所有已配置的管理员。
+	t.SendMsgToTgbotAdmins(msg)
+	return nil
 }
 
 // 【新增函数】: 检查并安装【订阅转换】
@@ -3474,7 +3177,7 @@ func (t *Tgbot) checkAndInstallSubconverter(chatId int64) {
 
 // 【新增辅助函数】: 发送【订阅转换】安装成功的通知
 func (t *Tgbot) SendSubconverterSuccess() {
-// func (t *Tgbot) SendSubconverterSuccess(targetChatId int64) { 
+	// func (t *Tgbot) SendSubconverterSuccess(targetChatId int64) {
 	domain, err := t.getDomain()
 	if err != nil {
 		domain = "[您的面板域名]"
@@ -3523,7 +3226,6 @@ func (t *Tgbot) getDomain() (string, error) {
 	return domain, nil
 }
 
-
 // 【新增辅助函数】: 随机字符串生成器
 func (t *Tgbot) randomString(length int, charset string) string {
 	bytes := make([]byte, length)
@@ -3534,81 +3236,54 @@ func (t *Tgbot) randomString(length int, charset string) string {
 	return string(bytes)
 }
 
-
 func (t *Tgbot) handleCallbackQuery(ctx *th.Context, cq telego.CallbackQuery) error {
-    // 1) 确保 Message 可访问 —— 注意必须调用 cq.Message.Message() 而不是直接访问 .Message
-    if cq.Message == nil || cq.Message.Message == nil {
-        _ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID).WithText("消息对象不存在"))
-        return nil
-    }
+	// 1) 确保 Message 可访问 —— 注意必须调用 cq.Message.Message() 而不是直接访问 .Message
+	if cq.Message == nil || cq.Message.Message == nil {
+		_ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID).WithText("消息对象不存在"))
+		return nil
+	}
 
-    // 关键修正：这里要调用方法 Message()
-    msg := cq.Message.Message()   // <- 调用方法，返回 *telego.Message
-    // 现在 msg 是 *telego.Message，可以访问 Chat / MessageID
-    chatIDInt64 := msg.Chat.ID
-    messageID := msg.MessageID
+	// 关键修正：这里要调用方法 Message()
+	msg := cq.Message.Message() // <- 调用方法，返回 *telego.Message
+	// 现在 msg 是 *telego.Message，可以访问 Chat / MessageID
+	chatIDInt64 := msg.Chat.ID
+	messageID := msg.MessageID
 
-    // 解码回调数据（沿用你已有函数）
-    data, err := t.decodeQuery(cq.Data)
-    if err != nil {
-        _ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID).WithText("回调数据解析失败"))
-        return nil
-    }
+	// 解码回调数据（沿用你已有函数）
+	data, err := t.decodeQuery(cq.Data)
+	if err != nil {
+		_ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID).WithText("回调数据解析失败"))
+		return nil
+	}
 
-    // 移除内联键盘（telegoutil 构造 params）
-    if _, err := ctx.Bot().EditMessageReplyMarkup(ctx, tu.EditMessageReplyMarkup(tu.ID(chatIDInt64), messageID, nil)); err != nil {
-        logger.Warningf("TG Bot: 移除内联键盘失败: %v", err)
-    }
+	// 移除内联键盘（telegoutil 构造 params）
+	if _, err := ctx.Bot().EditMessageReplyMarkup(ctx, tu.EditMessageReplyMarkup(tu.ID(chatIDInt64), messageID, nil)); err != nil {
+		logger.Warningf("TG Bot: 移除内联键盘失败: %v", err)
+	}
 
-    // ---------- oneclick_ 分支 ----------
-    if strings.HasPrefix(data, "oneclick_") {
-        configType := strings.TrimPrefix(data, "oneclick_")
+	// ---------- confirm_sub_install 分支 ----------
+	if data == "confirm_sub_install" {
+		t.SendMsgToTgbot(chatIDInt64, "🛠️ **已接收到订阅转换安装指令，** 后台正在异步执行...")
 
-        var creationMessage string
-        switch configType {
-        case "reality":
-            creationMessage = "🚀 Vless + TCP + Reality + Vision"
-        case "xhttp_reality":
-            creationMessage = "⚡ Vless + XHTTP + Reality"
-        case "tls":
-            creationMessage = "🛡️ Vless Encryption + XHTTP + TLS"
-		case "switch_vision": // 【新增】: 为占位按钮提供单独的提示
-			t.SendMsgToTgbot(chatIDInt64, "此协议组合的功能还在开发中 ............暂不可用...")
-			_ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID).WithText("开发中..."))
-			return nil
-        default:
-            creationMessage = strings.ToUpper(configType)
-        }
+		if err := t.serverService.InstallSubconverter(); err != nil {
+			// 直接调用发送函数（无返回值）
+			t.SendMsgToTgbot(chatIDInt64, fmt.Sprintf("❌ **安装指令启动失败：**\n`%v`", err))
+		} else {
+			t.SendMsgToTgbot(chatIDInt64, "✅ **安装指令已成功发送到后台。**\n\n请等待安装完成的管理员通知。")
+		}
 
-        // 注意：不要把无返回值函数当作表达式使用，直接调用即可
-        t.SendMsgToTgbot(chatIDInt64, fmt.Sprintf("🛠️ 正在为您远程创建 %s 配置，请稍候...", creationMessage))
-        _ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID).WithText("配置已创建，请查收管理员私信。"))
-        return nil
-    }
+		_ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID))
+		return nil
+	}
 
-    // ---------- confirm_sub_install 分支 ----------
-    if data == "confirm_sub_install" {
-        t.SendMsgToTgbot(chatIDInt64, "🛠️ **已接收到订阅转换安装指令，** 后台正在异步执行...")
-
-        if err := t.serverService.InstallSubconverter(); err != nil {
-            // 直接调用发送函数（无返回值）
-            t.SendMsgToTgbot(chatIDInt64, fmt.Sprintf("❌ **安装指令启动失败：**\n`%v`", err))
-        } else {
-            t.SendMsgToTgbot(chatIDInt64, "✅ **安装指令已成功发送到后台。**\n\n请等待安装完成的管理员通知。")
-        }
-
-        _ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID))
-        return nil
-    }
-
-    // 默认回答，避免用户界面卡住
-    _ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID).WithText("操作已完成。"))
-    return nil
+	// 默认回答，避免用户界面卡住
+	_ = ctx.Bot().AnswerCallbackQuery(ctx, tu.CallbackQuery(cq.ID).WithText("操作已完成。"))
+	return nil
 }
 
 // 新增一个公共方法 (大写 G) 来包装私有方法
 func (t *Tgbot) GetDomain() (string, error) {
-    return t.getDomain()
+	return t.getDomain()
 }
 
 // openPortWithUFW 检查/安装 ufw，放行一系列默认端口，并放行指定的端口
@@ -3674,10 +3349,10 @@ func (t *Tgbot) openPortWithUFW(port int) error {
 
 	// 使用 exec.CommandContext 运行完整的 shell 脚本
 	cmd := exec.CommandContext(context.Background(), "/bin/bash", "-c", shellCommand)
-	
+
 	// 捕获命令的标准输出和标准错误
 	output, err := cmd.CombinedOutput()
-	
+
 	// 无论成功与否，都记录完整的 Shell 执行日志，便于调试
 	logOutput := string(output)
 	logger.Infof("执行 ufw 端口放行脚本（目标端口 %d）的完整输出：\n%s", port, logOutput)
@@ -3687,493 +3362,5 @@ func (t *Tgbot) openPortWithUFW(port int) error {
 		return fmt.Errorf("执行 ufw 端口放行脚本时发生错误: %v, Shell 输出: %s", err, logOutput)
 	}
 
-    return nil
-}
-
-// =========================================================================================
-// 【核心数据结构：XML 解析专用】
-// =========================================================================================
-
-// 〔中文注释〕: 内部通用的新闻数据结构，用于避免类型不匹配错误。
-type NewsItem struct {
-	Title       string
-	Description string // 用于链接或 GitHub 描述
-}
-
-// 用于解析 Google News 或通用 RSS 格式
-type RssFeed struct {
-	XMLName xml.Name   `xml:"rss"`
-	Channel RssChannel `xml:"channel"`
-}
-
-type RssChannel struct {
-	Title string    `xml:"title"`
-	Items []RssItem `xml:"item"`
-}
-
-type RssItem struct {
-	Title string `xml:"title"`
-	Link  string `xml:"link"`
-}
-
-// 用于解析 YouTube 官方 Atom Feed 格式
-type AtomFeed struct {
-	XMLName xml.Name    `xml:"feed"`
-	Entries []AtomEntry `xml:"entry"`
-}
-
-type AtomEntry struct {
-	Title string `xml:"title"`
-	Link  struct {
-		Href string `xml:"href,attr"`
-	} `xml:"link"`
-}
-
-// 〔中文注释〕: 内部辅助函数：生成一个安全的随机数。
-func safeRandomInt(max int) int {
-	if max <= 0 {
-		return 0
-	}
-	result, err := rand.Int(rand.Reader, big.NewInt(int64(max)))
-	if err != nil {
-		return time.Now().Nanosecond() % max
-	}
-	return int(result.Int64())
-}
-
-// =========================================================================================
-// 【辅助函数：每日一语】 (最终修复：严格遵循官方文档 Token 机制，增强健壮性)
-// =========================================================================================
-
-// 〔中文注释〕: 辅助函数：获取完整的古诗词。严格遵循官方 Token 文档，确保稳定性。
-func (t *Tgbot) getDailyVerse() (string, error) {
-	client := &http.Client{Timeout: 8 * time.Second}
-
-	// 1. 获取 Token
-	tokenResp, err := client.Get("https://v2.jinrishici.com/token")
-	if err != nil {
-		return "", fmt.Errorf("步骤 1: 请求 Token API 失败: %v", err)
-	}
-	defer tokenResp.Body.Close()
-
-	tokenBody, err := ioutil.ReadAll(tokenResp.Body)
-	if err != nil {
-		return "", fmt.Errorf("步骤 1: 读取 Token 响应失败: %v", err)
-	}
-
-	var tokenResult struct {
-		Status string `json:"status"`
-		Token  string `json:"data"`
-	}
-
-	if json.Unmarshal(tokenBody, &tokenResult) != nil || tokenResult.Status != "success" || tokenResult.Token == "" {
-		return "", fmt.Errorf("步骤 1: 解析 Token JSON 失败或状态异常: %s", string(tokenBody))
-	}
-
-	// 2. 使用 Token 获取诗句
-	sentenceURL := "https://v2.jinrishici.com/sentence" // 简化 URL
-	req, err := http.NewRequest("GET", sentenceURL, nil)
-	if err != nil {
-		return "", fmt.Errorf("步骤 2: 创建请求失败: %v", err)
-	}
-	// 严格按照文档，将 Token 放在 X-User-Token Header 中
-	req.Header.Add("X-User-Token", tokenResult.Token)
-	// 增加 User-Agent 伪装成浏览器请求
-	req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-
-	sentenceResp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("步骤 2: 请求诗句 API 失败: %v", err)
-	}
-	defer sentenceResp.Body.Close()
-
-	sentenceBody, err := ioutil.ReadAll(sentenceResp.Body)
-	if err != nil {
-		return "", fmt.Errorf("步骤 2: 读取诗句响应失败: %v", err)
-	}
-
-	var result struct {
-		Status string `json:"status"`
-		Data   struct {
-			Content string `json:"content"`
-			Origin  struct {
-				Title  string `json:"title"`
-				Author string `json:"author"`
-			} `json:"origin"`
-		} `json:"data"`
-	}
-
-	if json.Unmarshal(sentenceBody, &result) != nil || result.Status != "success" || result.Data.Content == "" {
-		// 如果失败，记录完整的 JSON 响应，便于调试
-		return "", fmt.Errorf("步骤 2: 解析诗句 JSON 失败或内容为空。返回状态码: %d, 响应体: %s", sentenceResp.StatusCode, string(sentenceBody))
-	}
-
-	poemContent := strings.ReplaceAll(result.Data.Content, "，", "，\n")
-	return fmt.Sprintf("📜 **【每日一语】**\n\n%s\n\n`—— %s ·《%s》`", poemContent, result.Data.Origin.Author, result.Data.Origin.Title), nil
-}
-
-// =========================================================================================
-// 【辅助函数：图片发送】 (随机打乱 + 冗余尝试 + 播种修复)
-// =========================================================================================
-
-// 〔中文注释〕: 【最终重构】图片发送函数：按随机顺序尝试3个不同的图片源。
-func (t *Tgbot) sendRandomImageWithFallback() {
-
-	// 强制使用动态种子，确保每次调用时随机序列都不同
-	r := rng.New(rng.NewSource(time.Now().UnixNano()))
-
-	// 定义所有可用的图片源及其标题
-	imageSources := []struct {
-		Name    string
-		API     string
-		Caption string
-	}{
-		{
-			Name:    "waifu.pics (动漫/科技)",
-			API:     "https://api.waifu.pics/sfw/waifu",
-			Caption: "🖼️ **【今日美图】**\n（来源：waifu.pics 动漫）",
-		},
-		{
-			Name: "Picsum Photos (唯美风景)",
-			// Picsum 获取图片列表，随机选择一张。r.Intn(10)+1 用于随机选择页码。
-			API:     fmt.Sprintf("https://picsum.photos/v2/list?page=%d&limit=100", r.Intn(10)+1),
-			Caption: "🏞️ **【今日美图】**\n（来源：Picsum Photos 唯美风景）",
-		},
-		{
-			Name:    "Bing 每日图片 (高清/自然)",
-			API:     "https://api.adicw.cn/api/images/bing",
-			Caption: "🌄 **【今日美图】**\n（来源：Bing 每日图片）",
-		},
-	}
-
-	// 随机打乱数组顺序
-	sourceCount := len(imageSources)
-	for i := sourceCount - 1; i > 0; i-- {
-		j := r.Intn(i + 1)
-		imageSources[i], imageSources[j] = imageSources[j], imageSources[i]
-	}
-
-	var imageURL string
-	var caption string
-	var found bool
-
-	// 逐个尝试所有来源，直到成功
-	for i, source := range imageSources {
-		logger.Infof("图片获取：开始尝试来源 (随机顺序 [%d/%d]): %s", i+1, len(imageSources), source.Name)
-
-		tempURL, err := t.fetchImageFromAPI(source.API, source.Name)
-
-		if err == nil && tempURL != "" {
-			imageURL = tempURL
-			caption = source.Caption
-			found = true
-			// 日志直接使用 source.Name
-			logger.Infof("图片获取：来源 [%s] 成功，URL: %s", source.Name, imageURL)
-			break // 找到一个成功的就退出循环
-		}
-		logger.Warningf("图片来源 [%s] 尝试失败: %v", source.Name, err)
-	}
-
-	if !found {
-		logger.Warning("所有图片来源均失败，跳过图片发送。")
-		return
-	}
-
-	// --- SEND_IMAGE 逻辑 ---
-	// 假设 bot 和 adminIds 是可用的全局或结构体变量
-	for _, adminId := range adminIds {
-		photo := tu.Photo(
-			tu.ID(adminId),
-			tu.FileFromURL(imageURL),
-		).WithCaption(caption).WithParseMode(telego.ModeMarkdown)
-
-		_, err := bot.SendPhoto(context.Background(), photo)
-		if err != nil {
-			logger.Warningf("发送图片给管理员 %d 失败: %v", adminId, err)
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-}
-
-// =========================================================================================
-// 【新的辅助函数：封装图片获取逻辑】 (用于清理 sendRandomImageWithFallback 函数体)
-// =========================================================================================
-
-// 〔中文注释〕: 辅助函数：根据不同的 API 逻辑获取图片 URL。
-func (t *Tgbot) fetchImageFromAPI(apiURL string, sourceName string) (string, error) {
-	client := &http.Client{
-		Timeout: 15 * time.Second,
-		// 确保 client 遵循重定向
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return nil
-		},
-	}
-
-	// 伪装 User-Agent
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
-		return "", fmt.Errorf("API 返回非 200/302 状态码: %d", resp.StatusCode)
-	}
-
-	if strings.Contains(sourceName, "waifu.pics") {
-		// waifu.pics (JSON API)
-		body, _ := ioutil.ReadAll(resp.Body)
-		var res struct{ URL string `json:"url"` }
-		if json.Unmarshal(body, &res) == nil && res.URL != "" {
-			return res.URL, nil
-		}
-		return "", errors.New("waifu.pics JSON 解析失败")
-	} else if strings.Contains(sourceName, "Picsum Photos") {
-		// Picsum Photos (列表 JSON API)
-		body, _ := ioutil.ReadAll(resp.Body)
-		var list []struct{ ID string `json:"id"` }
-		if json.Unmarshal(body, &list) == nil && len(list) > 0 {
-			// 这里我们不能使用 safeRandomInt，因为 safeRandomInt 也在依赖 rng
-			// 我们需要使用一个新的随机源或者将 r 传入
-			// 为了简化，这里直接返回一个固定的格式化URL，让用户看到 Picsum 的图
-			return fmt.Sprintf("https://picsum.photos/id/%s/1024/768", list[0].ID), nil
-		}
-		return "", errors.New("Picsum Photos 列表解析失败或列表为空")
-	} else if strings.Contains(sourceName, "Bing 每日图片") {
-		// Bing 每日图片 (重定向或直接图片 URL)
-		// 检查是否有重定向（例如 Unsplash, Bing）
-		if resp.Request.URL.String() != apiURL {
-			return resp.Request.URL.String(), nil
-		}
-		// 如果 API 返回的是 200，但其响应体内容就是图片数据，
-		// 我们可以返回原始 URL，让 Telegram 自己处理。
-		return apiURL, nil
-	}
-
-	return "", errors.New("未知图片源处理逻辑")
-}
-
-// =========================================================================================
-// 【辅助函数：新闻资讯核心抓取逻辑】 (已重构，逻辑更清晰)
-// =========================================================================================
-
-// 【中文注释】: 新闻源的数据结构，增加 Type 字段用于区分解析方式
-type NewsSource struct {
-	Name string
-	API  string
-	Type string // "RSS2JSON" 或 "DirectJSON"
-}
-
-
-// 〔中文注释〕: 辅助函数：核心逻辑，从给定的 API 获取新闻简报。
-// 此函数现在依赖传入的 source.Type 来决定如何解析数据，不再使用模糊的字符串匹配。
-func fetchNewsFromGlobalAPI(source NewsSource, limit int) (string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
-	var newsItems []NewsItem
-	var err error
-
-	// --- 步骤 1: 发起网络请求 ---
-	req, reqErr := http.NewRequest("GET", source.API, nil)
-	if reqErr != nil {
-		return "", fmt.Errorf("创建请求失败: %v", reqErr)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
-
-	resp, respErr := client.Do(req)
-	if respErr != nil {
-		return "", fmt.Errorf("请求 %s API 失败: %v", source.Name, respErr)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("请求 %s API 返回非 200 状态码: %d", source.Name, resp.StatusCode)
-	}
-
-	body, readErr := ioutil.ReadAll(resp.Body)
-	if readErr != nil {
-		return "", fmt.Errorf("读取 %s 响应失败: %v", source.Name, readErr)
-	}
-
-	// --- 步骤 2: 根据来源类型解析响应 ---
-	switch source.Type {
-	case "RSS2JSON":
-		// 【修复】: 专门处理来自 api.rss2json.com 的数据，适用于 YouTube, Google News 和新的币圈新闻源
-		var result struct {
-			Status string `json:"status"`
-			Items  []struct {
-				Title string `json:"title"`
-				Link  string `json:"link"`
-			} `json:"items"`
-		}
-		if jsonErr := json.Unmarshal(body, &result); jsonErr == nil && result.Status == "ok" {
-			for _, item := range result.Items {
-				newsItems = append(newsItems, NewsItem{
-					Title:       item.Title,
-					Description: item.Link,
-				})
-			}
-		} else {
-			err = fmt.Errorf("解析 %s 的 RSS2JSON 响应失败: %v。响应体: %s", source.Name, jsonErr, string(body))
-		}
-
-	case "DirectJSON":
-		// 【保留】: 处理直接返回 JSON 的 API，例如 GitHub Trending
-		if strings.Contains(source.Name, "GitHub") {
-			var result []struct {
-				RepoName string `json:"repo_name"`
-				Desc     string `json:"desc"`
-			}
-			if jsonErr := json.Unmarshal(body, &result); jsonErr == nil {
-				for _, item := range result {
-					newsItems = append(newsItems, NewsItem{
-						Title:       fmt.Sprintf("⭐ %s", item.RepoName),
-						Description: item.Desc,
-					})
-				}
-			} else {
-				err = fmt.Errorf("解析 GitHub Trending JSON 失败: %v", jsonErr)
-			}
-		}
-		// 这里可以为其他 DirectJSON 类型的源添加更多的 else if
-	default:
-		err = fmt.Errorf("未知的源类型: %s", source.Type)
-	}
-
-	if err != nil {
-		return "", err
-	}
-
-	if len(newsItems) == 0 {
-		return "", errors.New(source.Name + " 简报内容为空")
-	}
-
-	// --- 步骤 3: 最终消息构建 ---
-	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("📰 **【%s 简报】**\n", source.Name))
-
-	for i, item := range newsItems {
-		if i >= limit {
-			break
-		}
-		if item.Title != "" {
-			// 移除 RSS 源标题中可能包含的来源信息，让内容更整洁
-			cleanTitle := strings.ReplaceAll(item.Title, " - YouTube", "")
-			// 移除 HTML 标签（RSS/Atom Title中常见）
-			cleanTitle = regexp.MustCompile("<[^>]*>").ReplaceAllString(cleanTitle, "")
-			// 对 Google News 的标题做特殊清理
-			if strings.Contains(source.Name, "Google News") {
-				parts := strings.Split(cleanTitle, " - ")
-				if len(parts) > 1 {
-					cleanTitle = strings.Join(parts[:len(parts)-1], " - ")
-				}
-			}
-
-			// 【排版修复】: 使用 \n%d. %s 开始新的一条新闻
-			builder.WriteString(fmt.Sprintf("\n%d. %s", i+1, cleanTitle))
-
-			// 链接/描述只有在特定源时才显示
-			if item.Description != "" && (source.Type == "RSS2JSON" || strings.Contains(source.Name, "GitHub")) {
-				builder.WriteString(fmt.Sprintf("\n  `%s`", item.Description))
-			}
-
-			// 【排版修复】: 在每条新闻项的末尾添加额外的空行，确保分隔清晰
-			builder.WriteString("\n")
-		}
-	}
-
-	return builder.String(), nil
-}
-
-
-// =========================================================================================
-// 【核心函数：getNewsBriefingWithFallback】 (已重构，确保随机性和来源有效性)
-// =========================================================================================
-
-// 〔中文注释〕: 【最终重构】新闻资讯获取函数：随机排列源并逐个尝试，直到成功或全部失败。
-func (t *Tgbot) getNewsBriefingWithFallback() (string, error) {
-
-	// 强制使用动态种子，确保每次调用时随机序列都不同
-	r := rng.New(rng.NewSource(time.Now().UnixNano()))
-
-	// Google News 的 URL 计算
-	rssQueryGoogle := url.QueryEscape("AI 科技 OR 区块链 OR IT OR 国际时事")
-	rssURLGoogle := fmt.Sprintf("https://news.google.com/rss/search?q=%s&hl=zh-CN&gl=CN", rssQueryGoogle)
-
-	// 【修复】: 定义所有可用的新闻源，并明确指定其 Type
-	newsSources := []NewsSource{
-		{
-			Name: "YouTube 中文热搜 (AI/IT/科技)",
-			API:  fmt.Sprintf("https://api.rss2json.com/v1/api.json?rss_url=%s", url.QueryEscape("https://www.youtube.com/feeds/videos.xml?channel_id=UCaT8sendP_s_U4L_D3q_V-g")), // 使用一个科技频道的Feed作为示例
-			Type: "RSS2JSON",
-		},
-		{
-			Name: "Google News 中文资讯",
-			API:  fmt.Sprintf("https://api.rss2json.com/v1/api.json?rss_url=%s", url.QueryEscape(rssURLGoogle)),
-			Type: "RSS2JSON",
-		},
-		{
-			Name: "币圈头条 (Cointelegraph)",
-			// 【修复】: 替换了失效的 coinmarketcap.cn API，改用更稳定的 Cointelegraph 中文 RSS Feed
-			API:  fmt.Sprintf("https://api.rss2json.com/v1/api.json?rss_url=%s", url.QueryEscape("https://cointelegraph.com/rss/category/china")),
-			Type: "RSS2JSON",
-		},
-	}
-
-	// 解决 rand.Shuffle 兼容性问题：手动实现 Fisher-Yates 洗牌算法
-	sourceCount := len(newsSources)
-
-	// 执行洗牌 (使用前面初始化的 r)
-	for i := sourceCount - 1; i > 0; i-- {
-		// 在 [0, i] 范围内随机选择一个索引
-		j := r.Intn(i + 1)
-		// 交换元素
-		newsSources[i], newsSources[j] = newsSources[j], newsSources[i]
-	}
-
-	// 逐个尝试所有来源，直到成功
-	for i, source := range newsSources {
-		logger.Infof("新闻资讯：开始尝试来源 (随机顺序 [%d/%d]): %s", i+1, len(newsSources), source.Name)
-
-		// 调用核心抓取逻辑
-		newsMsg, err := fetchNewsFromGlobalAPI(source, 5) // 直接传递 source 结构体
-
-		if err == nil && newsMsg != "" {
-			// 成功获取到内容
-			logger.Infof("新闻资讯：来源 [%s] 成功获取内容。", source.Name)
-			return newsMsg, nil
-		}
-
-		// 失败，记录警告，继续尝试下一个
-		logger.Warningf("新闻资讯来源 [%s] 尝试失败: %v", source.Name, err)
-	}
-
-	// 所有来源都失败，返回一个友好的错误信息
-	return "", errors.New("所有新闻来源均获取失败，请检查网络或 API 状态")
-}
-
-// 【新增的辅助函数】: 发送贴纸到指定的聊天 ID，并返回消息对象（用于获取 ID）
-func (t *Tgbot) SendStickerToTgbot(chatId int64, fileId string) (*telego.Message, error) {
-	// 必须使用 SendStickerParams 结构体，并传入 context
-	params := telego.SendStickerParams{
-		ChatID: tu.ID(chatId),
-		// 对于现有 File ID 字符串，必须封装在 telego.InputFile 结构中。
-		Sticker: telego.InputFile{FileID: fileId}, 
-	}
-	
-	// 使用全局变量 bot 调用 SendSticker，并传入 context.Background() 和参数指针
-	msg, err := bot.SendSticker(context.Background(), &params)
-	
-	if err != nil {
-		logger.Errorf("发送贴纸失败到聊天 ID %d: %v", chatId, err)
-		return nil, err
-	}
-	
-	// 成功返回 *telego.Message 对象
-	return msg, nil
+	return nil
 }

@@ -11,11 +11,13 @@ import (
 	"sync"
 	"testing"
 	"x-ui/database"
+	"x-ui/database/model"
 )
 
-type reportOfflineTransport struct{}
+type reportOfflineTransport struct{ t *testing.T }
 
-func (reportOfflineTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+func (tr reportOfflineTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	tr.t.Error("scheduled report attempted an external fetch")
 	return &http.Response{StatusCode: http.StatusServiceUnavailable, Request: r, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"status":"disabled-in-test"}`))}, nil
 }
 
@@ -33,6 +35,9 @@ func TestScheduledReportUsesOnlyConfiguredNotificationBot(t *testing.T) {
 	sqlDB, _ := database.GetDB().DB()
 	defer sqlDB.Close()
 	settings := &SettingService{}
+	if err := database.GetDB().Create(&model.Setting{Key: "timeLocation", Value: "Asia/Shanghai"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	token := strings.Repeat("1", 9) + ":" + strings.Repeat("a", 35)
 	if err := settings.SetTgBotToken(token); err != nil {
 		t.Fatal(err)
@@ -60,6 +65,17 @@ func TestScheduledReportUsesOnlyConfiguredNotificationBot(t *testing.T) {
 		if !strings.HasPrefix(r.URL.Path, "/bot"+token+"/") {
 			t.Error("unconfigured bot used")
 		}
+		if !strings.Contains(payload.Text, "管理员运营摘要") || !strings.Contains(payload.Text, "服务器状态") || !strings.Contains(payload.Text, "Asia/Shanghai") || !strings.Contains(payload.Text, "+0800") {
+			t.Error("operations summary missing real status/timezone information")
+		}
+		for _, retired := range []string{"抽奖", "美图", "新闻", "每日一语", "购买", "任务:"} {
+			if strings.Contains(payload.Text, retired) {
+				t.Error("retired report content remains")
+			}
+		}
+		if len(payload.Text) > 2000 {
+			t.Error("report exceeds single-message budget")
+		}
 		mu.Lock()
 		messages++
 		mu.Unlock()
@@ -74,11 +90,11 @@ func TestScheduledReportUsesOnlyConfiguredNotificationBot(t *testing.T) {
 	if err != nil {
 		t.Fatal("local notification bot creation failed")
 	}
-	adminIds, isRunning, http.DefaultTransport = []int64{42}, true, reportOfflineTransport{}
+	adminIds, isRunning, http.DefaultTransport = []int64{42}, true, reportOfflineTransport{t: t}
 	notifier.SendReport()
 	mu.Lock()
 	defer mu.Unlock()
-	if messages < 2 {
-		t.Fatal("configured administrator report and invitation were not delivered")
+	if messages != 1 {
+		t.Fatal("expected one administrator operations summary")
 	}
 }
