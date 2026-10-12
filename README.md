@@ -23,6 +23,34 @@
 - **去首页自动广告**：移除首页自动弹出的 Pro 欢迎推广，不影响正常导航；不承诺删除所有手动功能限制提示。[改动范围](docs/home-promotion-removal.md)
 - **移除硬编码外报**：删除继承的第三方 Telegram 凭据及未经用户配置的外报路径，**保留用户自行配置的通知**。不代表历史凭据已撤销或完成全仓安全审计。
 
+## 界面预览
+
+以下为同版本完整面板的**隔离演示**，不是生产服务器截图。客户端均为 `example.net` 演示数据，流量保持 0；系统指标来自隔离运行主机的真实采集，未伪造遥测。截图保留 HTTP loopback 的 TLS 警告，生产访问应启用 HTTPS。[截图来源与脱敏说明](docs/screenshots/README.md)
+
+### 系统仪表盘
+
+查看系统资源、网络与 Xray 运行状态。
+
+![系统仪表盘：隔离演示](docs/screenshots/dashboard.png)
+
+### 入站与客户端列表
+
+展开入站即可查看独立客户端的启用状态、额度、用量与到期时间。
+
+![入站与客户端列表：演示数据](docs/screenshots/clients.png)
+
+### 每月流量重置设置
+
+从「入站列表」展开客户端并点击编辑图标，开启月重置，设置每月 **1–31 日**；按「面板设置」中的时区执行，短月取月末。图中为 **31 日**，UUID 等凭据字段已隐藏。
+
+![客户端月重置编辑窗口：31 日](docs/screenshots/monthly-reset.png)
+
+### 手机布局
+
+同一中文面板在 390 px 窄屏下的纵向布局；点击图片可查看长图。
+
+<a href="docs/screenshots/mobile.png"><img src="docs/screenshots/mobile.png" alt="手机布局：隔离演示长图" width="300"></a>
+
 ## 如何使用客户端月重置
 
 1. 在「面板设置」确认时区（`timeLocation`）；建议明确设置为 `Asia/Shanghai` 等 IANA 时区。

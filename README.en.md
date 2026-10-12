@@ -23,6 +23,34 @@ This list follows the free source's routes, services and frontend, not Pro place
 - **No automatic homepage advertisement:** removes the automatic Pro welcome promotion, not every manually opened feature-restriction prompt. [Scope](docs/home-promotion-removal.md)
 - **No inherited hardcoded reporting:** removes third-party Telegram credentials and reporting paths not configured by the user; **user-configured notifications remain**. This does not purge history, prove credential revocation or constitute a complete security audit.
 
+## Interface preview
+
+These are real Chromium captures of the **isolated full panel**, not production screenshots. Synthetic clients use `example.net` and zero traffic; system telemetry is genuinely collected from the isolated host, not fabricated. The loopback HTTP TLS warning is retained; use HTTPS for production access. [Capture provenance and sanitization](docs/screenshots/README.md)
+
+### System dashboard
+
+System resources, networking and Xray runtime status.
+
+![System dashboard — isolated demonstration](docs/screenshots/dashboard.png)
+
+### Inbounds and clients
+
+Expand an inbound to inspect individual client state, quota, usage and expiry.
+
+![Inbound and client list — synthetic demonstration data](docs/screenshots/clients.png)
+
+### Monthly reset settings
+
+Expand a client in the inbound list and click Edit. Enable monthly reset and choose **1–31**; the **panel timezone** applies and short months use their last day. The example selects **31**. UUID and credential fields are hidden.
+
+![Monthly client reset editor — day 31](docs/screenshots/monthly-reset.png)
+
+### Mobile layout
+
+The same Chinese UI at 390 px width. Click to view the full vertical capture.
+
+<a href="docs/screenshots/mobile.png"><img src="docs/screenshots/mobile.png" alt="Mobile layout — isolated demonstration" width="300"></a>
+
 ## Using monthly client resets
 
 1. Confirm Panel Settings → timezone (`timeLocation`), preferably an explicit IANA zone such as `Asia/Shanghai`.
