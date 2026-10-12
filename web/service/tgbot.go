@@ -6,7 +6,6 @@ import (
 	"crypto/tls" // 新增：用于 tls.Config
 	"embed"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"html"
@@ -2626,7 +2625,13 @@ func (t *Tgbot) clientTelegramUserInfo(chatId int64, email string, messageID ...
 		t.editMessageTgBot(chatId, messageID[0], output, inlineKeyboard)
 	} else {
 		t.SendMsgToTgbot(chatId, output, inlineKeyboard)
-		requestID := int32(binary.BigEndian.Uint32(uuid.New().NodeID()) & 0x7fffffff)
+		delete(bindingRequests, chatId)
+		requestID, err := reserveTelegramBindingID()
+		if err != nil {
+			logger.Warning("Telegram binding request reservation failed: ", err)
+			t.SendMsgToTgbot(chatId, "Cannot safely issue a user-binding request. Please retry or contact the administrator.", tu.ReplyKeyboardRemove())
+			return
+		}
 		bindingRequests[chatId] = struct {
 			id     int32
 			client int
