@@ -54,9 +54,10 @@ or proprietary source are used or bypassed.
 
 ## Development / update boundary
 
-`integration/upstream-v26.9.13` is untouched upstream source, separate from
-`feat/client-monthly-reset`. Review/merge upstream synchronization independently.
-Do not merge, tag or publish the feature before independent review and staging.
+Upstream baseline remains `8f6bcd84abe74c9374ae929d28df092e0acd75f3`.
+Integration/feature branches now also carry workflow safety changes.
+PRs #1/#2/#3 are merged into main after authorized review and acceptance.
+Source integration is not release or deployment authorization.
 No production SSH, database or installed panel was accessed during development.
 
 For future updates: fetch upstream, create an integration branch, audit **all**
@@ -64,18 +65,18 @@ workflows/scripts, run baseline tests/build, then rebase/cherry-pick the downstr
 commit and re-run tests plus isolated API/browser checks. Avoid general formatting
 or unrelated refactors in upstream files.
 
-Upstream release.yml runs on main push (build/artifacts), manual dispatch and
-published releases (release assets). docker.yml publishes on version tags or
-manual dispatch and still targets upstream image namespaces. Neither runs on
-these feature/integration pushes. downstream-validation.yml uses read-only
-permissions and only tests/builds; it does not upload releases or deploy.
+Inherited release.yml and docker.yml are now explicit-manual only: no push,
+tag or release event triggers. Docker still targets upstream image namespaces
+and must be re-audited before any separately approved dispatch.
+downstream-validation.yml runs on main/feature/integration and PRs with
+read-only permissions, tests/builds only; it never releases or deploys.
 Do not dispatch inherited publishing workflows or push version tags.
 
 The upstream installer can select free/Pro and upstream update scripts can
 replace downstream binaries. Do **not** use upstream auto-update to retain this
 feature. After approval, install only reviewed **free downstream** assets from
 https://github.com/luhaihui106/X-Panel-WH/releases, with a DB backup and verified
-source commit/checksum. No release exists for this draft; installation scripts
+source commit/checksum. No downstream release exists; installation scripts
 have intentionally not been broadly rewritten or executed.
 
 ## Reproducible verification
