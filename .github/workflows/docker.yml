@@ -1,9 +1,7 @@
 name: Release X-Panel for Docker
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*.*.*"
+  # Publishing needs separate approval; never run from source merges or tags.
 
 jobs:
   build:
