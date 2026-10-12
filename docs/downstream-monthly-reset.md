@@ -22,10 +22,17 @@ or proprietary source are used or bypassed.
 - Quota-disabled traffic can be re-enabled only if the client configuration is
   enabled and unexpired, and pre-reset usage met its quota. Manual-disabled or
   expired configurations are never enabled by this feature.
-- Runs in the existing 10-second Xray traffic job, **after GetTraffic(true)**
-  drains counters and AddTraffic applies them. Reset and marker share the same
-  SQLite transaction. If Xray is stopped/unreachable, reset waits for a successful
-  drain; no unsafe zeroing while old core counters remain.
+- Runs in the existing 10-second Xray traffic job. A shared collector lock is
+  acquired **before GetTraffic(true)** and held through persistence/reset/commit.
+  Inbound, client and outbound deltas and the monthly marker share a transaction;
+  Save/Commit errors abort it and suppress success/restart. Failed drained batches
+  remain in memory for retry before the next destructive read.
+  Configuration generation is read-only; ordinary AddTraffic calls cannot trigger
+  monthly resets. If Xray is stopped/unreachable, the scheduled reset waits.
+- **Crash limitation:** in-memory retry is not crash durability. A process crash
+  after the destructive core read and before SQLite commit can lose the batch;
+  Xray provides no atomic durable acknowledgement spanning these two systems.
+  External notifications remain best-effort and run only after commit.
 - Older API callers omitting both fields on edits retain existing values;
   explicit false disables. Old exports without fields remain disabled. The
   private cycle marker is not accepted from client JSON; DB backups preserve it.
@@ -62,7 +69,7 @@ Go 1.27, CGO + SQLite toolchain; Node 22:
 
 ```sh
 go test -vet=off ./...
-go test -vet=off -race ./web/service -run TestMonthly -v
+go test -vet=off -race ./web/service -v
 node web/assets/js/model/monthly-reset.test.cjs
 go build -o ./x-panel .
 ```
@@ -83,10 +90,12 @@ validation corrected that without changing upstream legacy decoding semantics.
 ## Review handoff / limitations
 
 Independent review is mandatory before merge; implementer self-checks are not
-independent approval. Review transaction commit-error propagation inherited from
-AddTraffic, overlapping traffic-job invocations, cycle persistence after process
-restart, original expiry-renewal interaction, email/ID change preservation, and
-large-panel query costs. Tests inject drained core deltas; no real proxy client
+independent approval. Regression tests now exercise real SQLite Save/Commit
+failures, concurrent destructive-read ordering, failed-batch retry, database
+reopen idempotence, expiry-renewal/manual-disable interaction and both old-ID
+client edits and stable-ID inbound email migrations preserving usage/markers.
+Configuration generation is tested as read-only. Large-panel query costs still
+need review. Tests inject drained core deltas; no real proxy client
 traffic was generated, and no end-to-end accelerated calendar/core recovery
 simulation was performed. Linux arm64 build/API/browser were exercised; other
 platform release matrices were not.

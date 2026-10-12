@@ -97,7 +97,10 @@ func TestMonthlyTrafficPipelineDrainsBeforeReset(t *testing.T) {
 	}
 	db.Create(&model.Setting{Key: "timeLocation", Value: "UTC"})
 	s := InboundService{}
-	if err, _ := s.AddTraffic(nil, []*xray.ClientTraffic{{Email: c.Email, Up: 50, Down: 70}}); err != nil {
+	collector := &trafficCollector{}
+	if err, _ := collector.collect(&s, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, []*xray.ClientTraffic{{Email: c.Email, Up: 50, Down: 70}}, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var stat xray.ClientTraffic
@@ -105,7 +108,9 @@ func TestMonthlyTrafficPipelineDrainsBeforeReset(t *testing.T) {
 	if stat.Up != 0 || stat.Down != 0 || stat.AllTime != 120 {
 		t.Fatalf("old core counters reintroduced: %+v", stat)
 	}
-	if err, _ := s.AddTraffic(nil, []*xray.ClientTraffic{{Email: c.Email, Up: 3, Down: 4}}); err != nil {
+	if err, _ := collector.collect(&s, func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
+		return nil, []*xray.ClientTraffic{{Email: c.Email, Up: 3, Down: 4}}, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	db.Where("email = ?", c.Email).First(&stat)

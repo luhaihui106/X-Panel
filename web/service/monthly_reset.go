@@ -10,7 +10,7 @@ import (
 )
 
 // Preserve omitted downstream fields from older API clients, but respect explicit values.
-func preserveMonthlyFields(oldJSON, newJSON string) (string, error) {
+func preserveMonthlyFields(oldJSON, newJSON string, oldIndex ...int) (string, error) {
 	var oldSettings, newSettings map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(oldJSON), &oldSettings); err != nil {
 		return "", err
@@ -32,8 +32,11 @@ func preserveMonthlyFields(oldJSON, newJSON string) (string, error) {
 		return "", err
 	}
 	for _, next := range newClients {
-		for _, previous := range oldClients {
-			same := false
+		for index, previous := range oldClients {
+			same := len(oldIndex) == 1 && len(newClients) == 1 && index == oldIndex[0]
+			if len(oldIndex) == 1 && len(newClients) == 1 && !same {
+				continue
+			}
 			for _, key := range []string{"id", "email", "password"} {
 				var a, b string
 				json.Unmarshal(next[key], &a)
@@ -89,7 +92,7 @@ func monthlyEnrollment(tx *gorm.DB, client *model.Client) (int, int64, error) {
 	return client.MonthlyResetDay, monthlyBoundary(time.Now().In(loc), client.MonthlyResetDay).UnixMilli(), nil
 }
 
-// Called only after core counters have been drained and applied in AddTraffic.
+// Called only after the serialized collector drains and applies core counters.
 // The cycle marker and traffic reset share the caller's SQLite transaction.
 func (s *InboundService) resetMonthlyClients(tx *gorm.DB, now time.Time) (bool, error) {
 	var inbounds []model.Inbound

@@ -219,8 +219,8 @@ func (s *XrayService) GetXrayConfig() (*xray.Config, error) {
 	// =================================================================
 	// 中文注释: 动态限速核心逻辑 - 第三步: 为设置了限速的用户分配对应的 Level，逐个 inbound 构建 inboundConfig
 	// =================================================================
-    // 触发一次空调用以处理可能的残留任务	
-    s.inboundService.AddTraffic(nil, nil) 
+    // Configuration generation is read-only. Traffic maintenance belongs to
+    // the serialized collector; GetAllInbounds above loads committed stats.
 	
 	for _, inbound := range inbounds {
 		if !inbound.Enable {

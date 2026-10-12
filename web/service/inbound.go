@@ -519,36 +519,35 @@ func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inb
 		return err
 	}
 
-	var emailExists bool
-
-	for _, oldClient := range oldClients {
-		emailExists = false
-		for _, newClient := range newClients {
-			if oldClient.Email == newClient.Email {
-				emailExists = true
-				break
+	// Match stable protocol identity before deleting statistics. An email rename
+	// is a migration of the existing row, not a new enrollment.
+	matched := make([]bool, len(oldClients))
+	for _, next := range newClients {
+		index := -1
+		for i, old := range oldClients {
+			if matched[i] { continue }
+			same := next.Email == old.Email
+			switch oldInbound.Protocol {
+			case "trojan": same = same || (next.Password != "" && next.Password == old.Password)
+			case "shadowsocks": // Email is the protocol identity.
+			default: same = same || (next.ID != "" && next.ID == old.ID)
 			}
+			if same { index = i; break }
 		}
-		if !emailExists {
-			err = s.DelClientStat(tx, oldClient.Email)
-			if err != nil {
-				return err
-			}
+		if index < 0 {
+			if err := s.AddClientStat(tx, oldInbound.Id, &next); err != nil { return err }
+			continue
+		}
+		matched[index] = true
+		old := oldClients[index]
+		if old.Email != next.Email {
+			if err := s.UpdateClientStat(tx, old.Email, &next); err != nil { return err }
+			if err := s.UpdateClientIPs(tx, old.Email, next.Email); err != nil { return err }
 		}
 	}
-	for _, newClient := range newClients {
-		emailExists = false
-		for _, oldClient := range oldClients {
-			if newClient.Email == oldClient.Email {
-				emailExists = true
-				break
-			}
-		}
-		if !emailExists {
-			err = s.AddClientStat(tx, oldInbound.Id, &newClient)
-			if err != nil {
-				return err
-			}
+	for i, old := range oldClients {
+		if !matched[i] {
+			if err := s.DelClientStat(tx, old.Email); err != nil { return err }
 		}
 	}
 	return nil
@@ -841,7 +840,7 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		return false, err
 	}
 	settingsClients := oldSettings["clients"].([]any)
-	preservedJSON, preserveErr := preserveMonthlyFields(oldInbound.Settings, data.Settings)
+	preservedJSON, preserveErr := preserveMonthlyFields(oldInbound.Settings, data.Settings, clientIndex)
 	if preserveErr != nil { return false, preserveErr }
 	data.Settings = preservedJSON
 	clients, err = s.GetClients(data)
@@ -884,14 +883,8 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	oldInbound.Settings = string(newSettings)
 	db := database.GetDB()
 	tx := db.Begin()
-
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
+	if tx.Error != nil { return false, tx.Error }
+	defer tx.Rollback()
 
 	if len(clients[0].Email) > 0 {
 		if len(oldEmail) > 0 {
@@ -963,58 +956,41 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		logger.Debug("Client old email not found")
 		needRestart = true
 	}
-	return needRestart, tx.Save(oldInbound).Error
+	if err = tx.Save(oldInbound).Error; err != nil { return false, err }
+	if err = tx.Commit().Error; err != nil { return false, err }
+	return needRestart, nil
 }
 
+// AddTraffic applies supplied deltas, but cannot certify a core drain.
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (error, bool) {
-	var err error
-	db := database.GetDB()
-	tx := db.Begin()
+	return s.storeTraffic(inboundTraffics, clientTraffics, false)
+}
 
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
-	err = s.addInboundTraffic(tx, inboundTraffics)
-	if err != nil {
-		return err, false
+func (s *InboundService) storeTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, drained bool) (error, bool) {
+	tx := database.GetDB().Begin()
+	if tx.Error != nil { return tx.Error, false }
+	defer tx.Rollback()
+	if err := s.addInboundTraffic(tx, inboundTraffics); err != nil { return err, false }
+	if err := s.addClientTraffic(tx, clientTraffics); err != nil { return err, false }
+	if drained {
+		if err := (&OutboundService{}).addOutboundTraffic(tx, inboundTraffics); err != nil { return err, false }
 	}
-	err = s.addClientTraffic(tx, clientTraffics)
-	if err != nil {
-		return err, false
+	monthlyRestart := false
+	if drained {
+		location, err := (&SettingService{}).GetTimeLocation()
+		if err != nil { return err, false }
+		var resetErr error
+		monthlyRestart, resetErr = s.resetMonthlyClients(tx, time.Now().In(location))
+		if resetErr != nil { return resetErr, false }
 	}
-
-	// The existing 10-second traffic job drains core counters before this reset.
-	// Keeping reset in the same transaction prevents stale counters being added back.
-	location, locationErr := (&SettingService{}).GetTimeLocation()
-	if locationErr != nil { err = locationErr; return err, false }
-	monthlyRestart, monthlyErr := s.resetMonthlyClients(tx, time.Now().In(location))
-	if monthlyErr != nil { err = monthlyErr; return err, false }
-
-	needRestart0, count, err := s.autoRenewClients(tx)
-	if err != nil {
-		logger.Warning("Error in renew clients:", err)
-	} else if count > 0 {
-		logger.Debugf("%v clients renewed", count)
-	}
-
-	needRestart1, count, err := s.disableInvalidClients(tx)
-	if err != nil {
-		logger.Warning("Error in disabling invalid clients:", err)
-	} else if count > 0 {
-		logger.Debugf("%v clients disabled", count)
-	}
-
-	needRestart2, count, err := s.disableInvalidInbounds(tx)
-	if err != nil {
-		logger.Warning("Error in disabling invalid inbounds:", err)
-	} else if count > 0 {
-		logger.Debugf("%v inbounds disabled", count)
-	}
-	return nil, (monthlyRestart || needRestart0 || needRestart1 || needRestart2)
+	needRestart0, _, err := s.autoRenewClients(tx)
+	if err != nil { return err, false }
+	needRestart1, _, err := s.disableInvalidClients(tx)
+	if err != nil { return err, false }
+	needRestart2, _, err := s.disableInvalidInbounds(tx)
+	if err != nil { return err, false }
+	if err := tx.Commit().Error; err != nil { return err, false }
+	return nil, monthlyRestart || needRestart0 || needRestart1 || needRestart2
 }
 
 func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic) error {
@@ -1098,7 +1074,7 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 		logger.Warning("AddClientTraffic update data ", err)
 	}
 
-	return nil
+	return err
 }
 
 func (s *InboundService) adjustTraffics(tx *gorm.DB, dbClientTraffics []*xray.ClientTraffic) ([]*xray.ClientTraffic, error) {
@@ -1153,6 +1129,7 @@ func (s *InboundService) adjustTraffics(tx *gorm.DB, dbClientTraffics []*xray.Cl
 		if err != nil {
 			logger.Warning("AddClientTraffic update inbounds ", err)
 			logger.Error(inbounds)
+			return nil, err
 		}
 	}
 
@@ -1206,7 +1183,8 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 					traffics[traffic_index].ExpiryTime = newExpiryTime
 					traffics[traffic_index].Down = 0
 					traffics[traffic_index].Up = 0
-					if !traffic.Enable {
+					manualEnabled, _ := c["enable"].(bool)
+					if !traffic.Enable && manualEnabled {
 						traffics[traffic_index].Enable = true
 						clientsToAdd = append(clientsToAdd,
 							struct {
@@ -1386,7 +1364,7 @@ func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *mod
 	result := tx.Model(xray.ClientTraffic{}).
 		Where("email = ?", email).
 		Updates(map[string]any{
-			"enable":      true,
+			"enable":      client.Enable,
 			"email":       client.Email,
 			"total":       client.TotalGB,
 			"expiry_time": client.ExpiryTime,

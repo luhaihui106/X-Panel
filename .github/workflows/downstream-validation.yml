@@ -18,6 +18,6 @@ jobs:
           node-version: '22'
       # Upstream has two pre-existing go-vet failures, documented below.
       - run: go test -vet=off ./...
-      - run: go test -vet=off -race ./web/service -run TestMonthly
+      - run: go test -vet=off -race ./web/service
       - run: node web/assets/js/model/monthly-reset.test.cjs
       - run: go build -o "$RUNNER_TEMP/x-panel" .
