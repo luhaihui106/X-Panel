@@ -24,24 +24,18 @@ func (j *XrayTrafficJob) Run() {
 	if !j.xrayService.IsXrayRunning() {
 		return
 	}
-	traffics, clientTraffics, err := j.xrayService.GetXrayTraffic()
+	err, needRestart := j.inboundService.CollectTraffic(j.xrayService.GetXrayTraffic, func(traffics []*xray.Traffic, clients []*xray.ClientTraffic) {
+		if enabled, err := j.settingService.GetExternalTrafficInformEnable(); err != nil {
+			logger.Warning("get ExternalTrafficInformEnable failed:", err)
+		} else if enabled {
+			j.informTrafficToExternalAPI(traffics, clients)
+		}
+	})
 	if err != nil {
+		logger.Warning("collect traffic failed (batch retained for retry):", err)
 		return
 	}
-	err, needRestart0 := j.inboundService.AddTraffic(traffics, clientTraffics)
-	if err != nil {
-		logger.Warning("add inbound traffic failed:", err)
-	}
-	err, needRestart1 := j.outboundService.AddTraffic(traffics, clientTraffics)
-	if err != nil {
-		logger.Warning("add outbound traffic failed:", err)
-	}
-	if ExternalTrafficInformEnable, err := j.settingService.GetExternalTrafficInformEnable(); ExternalTrafficInformEnable {
-		j.informTrafficToExternalAPI(traffics, clientTraffics)
-	} else if err != nil {
-		logger.Warning("get ExternalTrafficInformEnable failed:", err)
-	}
-	if needRestart0 || needRestart1 {
+	if needRestart {
 		j.xrayService.SetToNeedRestart()
 	}
 }

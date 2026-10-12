@@ -83,17 +83,21 @@ func (s *InboundService) checkPortExist(listen string, port int, ignoreId int) (
 }
 
 func (s *InboundService) GetClients(inbound *model.Inbound) ([]model.Client, error) {
-	settings := map[string][]model.Client{}
-	json.Unmarshal([]byte(inbound.Settings), &settings)
-	if settings == nil {
-		return nil, fmt.Errorf("setting is null")
+	// Validate only the new fields strictly. Legacy UI sends tgId as a string;
+	// retain upstream's permissive decoding for existing fields.
+	var validation struct { Clients []struct {
+		MonthlyResetEnabled bool `json:"monthlyResetEnabled"`
+		MonthlyResetDay int `json:"monthlyResetDay"`
+	} `json:"clients"` }
+	if err := json.Unmarshal([]byte(inbound.Settings), &validation); err != nil { return nil, err }
+	for _, client := range validation.Clients {
+		if client.MonthlyResetEnabled && (client.MonthlyResetDay < 1 || client.MonthlyResetDay > 31) {
+			return nil, fmt.Errorf("monthlyResetDay must be an integer from 1 to 31")
+		}
 	}
-
-	clients := settings["clients"]
-	if clients == nil {
-		return nil, nil
-	}
-	return clients, nil
+	var settings struct { Clients []model.Client `json:"clients"` }
+	_ = json.Unmarshal([]byte(inbound.Settings), &settings)
+	return settings.Clients, nil
 }
 
 func (s *InboundService) getAllEmails() ([]string, error) {
@@ -166,6 +170,9 @@ func (s *InboundService) checkEmailExistForInbound(inbound *model.Inbound) (stri
 
 // AddInbound adds a new inbound to db
 func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
+	if err := reserveTrafficIdentity(database.GetDB(), "inbound", inbound.Tag); err != nil { return inbound, false, err }
 	// 中文注释：检查端口是否已存在
 	exist, err := s.checkPortExist(inbound.Listen, inbound.Port, 0)
 	if err != nil {
@@ -268,32 +275,71 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	// 中文注释：开始数据库事务
 	db := database.GetDB()
 	tx := db.Begin()
-	defer func() {
-		if err == nil {
-			// 中文注释：如果没有错误，提交事务
-			tx.Commit()
-		} else {
-			// 中文注释：如果出现错误，回滚事务
-			tx.Rollback()
+	if tx.Error != nil {
+		return inbound, false, tx.Error
+	}
+	defer tx.Rollback()
+
+	// Settings defines the actual core identities, even when importing statistics.
+	for _, client := range clients {
+		if err = reserveTrafficIdentity(tx, "client", client.Email); err != nil {
+			return inbound, false, err
 		}
-	}()
+	}
+	if len(inbound.ClientStats) != 0 {
+		if len(inbound.ClientStats) != len(clients) {
+			return inbound, false, common.NewError("imported client statistics must match Settings clients exactly")
+		}
+		byEmail := make(map[string]model.Client, len(clients))
+		for _, client := range clients {
+			byEmail[client.Email] = client
+		}
+		for index := range inbound.ClientStats {
+			stat := &inbound.ClientStats[index]
+			client, ok := byEmail[stat.Email]
+			if !ok {
+				return inbound, false, common.NewError("imported client statistics must match Settings clients exactly")
+			}
+			delete(byEmail, stat.Email)
+			// Imported database IDs cannot select or overwrite an existing owner.
+			stat.Id = 0
+			stat.InboundId = inbound.Id
+			day, at, enrollmentErr := monthlyEnrollment(tx, &client)
+			if enrollmentErr != nil {
+				return inbound, false, enrollmentErr
+			}
+			stat.MonthlyResetDay = day
+			stat.MonthlyResetAt = at
+		}
+	}
 
 	// 中文注释：保存入站信息到数据库 (此时 inbound 对象已包含我们手动设置的 ID)
 	err = tx.Save(inbound).Error
 	if err == nil {
 		if len(inbound.ClientStats) == 0 {
 			for _, client := range clients {
-				s.AddClientStat(tx, inbound.Id, &client)
+				if err = s.AddClientStat(tx, inbound.Id, &client); err != nil {
+					return inbound, false, err
+				}
 			}
 		}
 	} else {
 		return inbound, false, err
 	}
 
+	if err = tx.Commit().Error; err != nil {
+		return inbound, false, err
+	}
+
 	// 中文注释：如果入站规则是启用的，则尝试通过 API 热加载到 Xray-core
 	needRestart := false
 	if inbound.Enable {
-		s.xrayApi.Init(p.GetAPIPort())
+		if p == nil {
+			return inbound, true, nil
+		}
+		if err := s.xrayApi.Init(p.GetAPIPort()); err != nil {
+			return inbound, true, nil
+		}
 		inboundJson, err1 := json.MarshalIndent(inbound.GenXrayInboundConfig(), "", "  ")
 		if err1 != nil {
 			logger.Debug("Unable to marshal inbound config:", err1)
@@ -315,31 +361,25 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 }
 
 func (s *InboundService) DelInbound(id int) (bool, error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
+
 	db := database.GetDB()
 
-	var tag string
-	needRestart := false
-	result := db.Model(model.Inbound{}).Select("tag").Where("id = ? and enable = ?", id, true).First(&tag)
-	if result.Error == nil {
-		s.xrayApi.Init(p.GetAPIPort())
-		err1 := s.xrayApi.DelInbound(tag)
-		if err1 == nil {
-			logger.Debug("Inbound deleted by api:", tag)
-		} else {
-			logger.Debug("Unable to delete inbound by api:", err1)
-			needRestart = true
-		}
-		s.xrayApi.Close()
-	} else {
-		logger.Debug("No enabled inbound founded to removing by api", tag)
-	}
-
-	// Delete client traffics of inbounds
-	err := db.Where("inbound_id = ?", id).Delete(xray.ClientTraffic{}).Error
+	inbound, err := s.GetInbound(id)
+	if err == gorm.ErrRecordNotFound { return false, nil }
 	if err != nil {
 		return false, err
 	}
-	inbound, err := s.GetInbound(id)
+	tag := inbound.Tag
+	tx := db.Begin()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	defer tx.Rollback()
+
+	// Retire ownership in the same transaction as live deletion.
+	err = retireInbound(tx, inbound)
 	if err != nil {
 		return false, err
 	}
@@ -348,13 +388,29 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 		return false, err
 	}
 	for _, client := range clients {
-		err := s.DelClientIPs(db, client.Email)
+		err := s.DelClientIPs(tx, client.Email)
 		if err != nil {
 			return false, err
 		}
 	}
 
-	return needRestart, db.Delete(model.Inbound{}, id).Error
+	if err = tx.Delete(model.Inbound{}, id).Error; err != nil {
+		return false, err
+	}
+	if err = tx.Commit().Error; err != nil {
+		return false, err
+	}
+	if !inbound.Enable {
+		return false, nil
+	}
+	if p == nil {
+		return true, nil
+	}
+	if err = s.xrayApi.Init(p.GetAPIPort()); err != nil {
+		return true, nil
+	}
+	defer s.xrayApi.Close()
+	return s.xrayApi.DelInbound(tag) != nil, nil
 }
 
 func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
@@ -368,6 +424,9 @@ func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
 }
 
 func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
+
 	exist, err := s.checkPortExist(inbound.Listen, inbound.Port, inbound.Id)
 	if err != nil {
 		return inbound, false, err
@@ -380,19 +439,20 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	if err != nil {
 		return inbound, false, err
 	}
+	inbound.Settings, err = preserveMonthlyFields(oldInbound.Settings, inbound.Settings)
+	if err != nil {
+		return inbound, false, err
+	}
 
 	tag := oldInbound.Tag
 
 	db := database.GetDB()
 	tx := db.Begin()
 
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
+	if tx.Error != nil {
+		return inbound, false, tx.Error
+	}
+	defer tx.Rollback()
 
 	err = s.updateClientTraffics(tx, oldInbound, inbound)
 	if err != nil {
@@ -464,7 +524,7 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	oldInbound.Remark = inbound.Remark
 	oldInbound.Enable = inbound.Enable
 	oldInbound.ExpiryTime = inbound.ExpiryTime
-                 // 中文注释：确保在更新数据时，将前端传来的 deviceLimit 值赋给从数据库中读出的旧对象。
+	// 中文注释：确保在更新数据时，将前端传来的 deviceLimit 值赋给从数据库中读出的旧对象。
 	oldInbound.DeviceLimit = inbound.DeviceLimit
 	oldInbound.Listen = inbound.Listen
 	oldInbound.Port = inbound.Port
@@ -478,10 +538,25 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		oldInbound.Tag = fmt.Sprintf("inbound-%v:%v", inbound.Listen, inbound.Port)
 	}
 
+	if err = renameInboundIdentity(tx, tag, oldInbound.Tag); err != nil { return inbound, false, err }
+	if err = tx.Save(oldInbound).Error; err != nil {
+		return inbound, false, err
+	}
+	if err = tx.Commit().Error; err != nil {
+		return inbound, false, err
+	}
+
 	needRestart := false
-	s.xrayApi.Init(p.GetAPIPort())
+	if p == nil {
+		return inbound, true, nil
+	}
+	if err := s.xrayApi.Init(p.GetAPIPort()); err != nil {
+		return inbound, true, nil
+	}
 	if s.xrayApi.DelInbound(tag) == nil {
 		logger.Debug("Old inbound deleted by api:", tag)
+	} else {
+		needRestart = true
 	}
 	if inbound.Enable {
 		inboundJson, err2 := json.MarshalIndent(oldInbound.GenXrayInboundConfig(), "", "  ")
@@ -500,7 +575,7 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 	s.xrayApi.Close()
 
-	return inbound, needRestart, tx.Save(oldInbound).Error
+	return inbound, needRestart, nil
 }
 
 func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inbound, newInbound *model.Inbound) error {
@@ -513,42 +588,43 @@ func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inb
 		return err
 	}
 
-	var emailExists bool
-
-	for _, oldClient := range oldClients {
-		emailExists = false
-		for _, newClient := range newClients {
-			if oldClient.Email == newClient.Email {
-				emailExists = true
-				break
+	// Match stable protocol identity before deleting statistics. An email rename
+	// is a migration of the existing row, not a new enrollment.
+	matched := make([]bool, len(oldClients))
+	for _, next := range newClients {
+		index := -1
+		for i, old := range oldClients {
+			if matched[i] { continue }
+			same := next.Email == old.Email
+			switch oldInbound.Protocol {
+			case "trojan": same = same || (next.Password != "" && next.Password == old.Password)
+			case "shadowsocks": // Email is the protocol identity.
+			default: same = same || (next.ID != "" && next.ID == old.ID)
 			}
+			if same { index = i; break }
 		}
-		if !emailExists {
-			err = s.DelClientStat(tx, oldClient.Email)
-			if err != nil {
-				return err
-			}
+		if index < 0 {
+			if err := s.AddClientStat(tx, oldInbound.Id, &next); err != nil { return err }
+			continue
+		}
+		matched[index] = true
+		old := oldClients[index]
+		if old.Email != next.Email {
+			if err := s.UpdateClientStat(tx, old.Email, &next); err != nil { return err }
+			if err := s.UpdateClientIPs(tx, old.Email, next.Email); err != nil { return err }
 		}
 	}
-	for _, newClient := range newClients {
-		emailExists = false
-		for _, oldClient := range oldClients {
-			if newClient.Email == oldClient.Email {
-				emailExists = true
-				break
-			}
-		}
-		if !emailExists {
-			err = s.AddClientStat(tx, oldInbound.Id, &newClient)
-			if err != nil {
-				return err
-			}
+	for i, old := range oldClients {
+		if !matched[i] {
+			if err := s.DelClientStat(tx, old.Email); err != nil { return err }
 		}
 	}
 	return nil
 }
 
 func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
 	clients, err := s.GetClients(data)
 	if err != nil {
 		return false, err
@@ -571,10 +647,10 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 			cm["updated_at"] = nowTs
 
 			// ↓↓↓↓↓↓  【重要补充】在这里手动确保 SpeedLimit 被写入数据库 ↓↓↓↓↓↓
-            // clients[i] 和 interfaceClients[i] 是一一对应的
-            // 我们从强类型的 clients[i] 对象中取出 SpeedLimit，赋值给弱类型的 map
+			// clients[i] 和 interfaceClients[i] 是一一对应的
+			// 我们从强类型的 clients[i] 对象中取出 SpeedLimit，赋值给弱类型的 map
 			cm["speedLimit"] = clients[i].SpeedLimit // 中文注释: 确保批量添加时，speedLimit 的值也被写入数据库。
-			
+
 			interfaceClients[i] = cm
 		}
 	}
@@ -630,19 +706,35 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	db := database.GetDB()
 	tx := db.Begin()
 
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	defer tx.Rollback()
+
+	for _, client := range clients {
+		if client.Email != "" {
+			if err = s.AddClientStat(tx, data.Id, &client); err != nil {
+				return false, err
+			}
 		}
-	}()
+	}
+	if err = tx.Save(oldInbound).Error; err != nil {
+		return false, err
+	}
+	if err = tx.Commit().Error; err != nil {
+		return false, err
+	}
 
 	needRestart := false
-	s.xrayApi.Init(p.GetAPIPort())
+	if p == nil {
+		return true, nil
+	}
+	if err := s.xrayApi.Init(p.GetAPIPort()); err != nil {
+		return true, nil
+	}
 	for _, client := range clients {
 		if len(client.Email) > 0 {
-			s.AddClientStat(tx, data.Id, &client)
+			// Statistics committed before core mutations.
 			if client.Enable {
 				cipher := ""
 				if oldInbound.Protocol == "shadowsocks" {
@@ -650,19 +742,19 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 				}
 
 				// 中文注释: 在这里为 API 调用添加 speedLimit 参数。
-					clientMap := map[string]any{
+				clientMap := map[string]any{
 					"email":    client.Email,
 					"id":       client.ID,
 					"security": client.Security,
 					"flow":     client.Flow,
 					"password": client.Password,
 					"cipher":   cipher,
-					
+
 					// Xray-core 会将这个值作为 level，然后去 policy 中寻找对应的限速策略。
-					"level":    client.SpeedLimit,
+					"level": client.SpeedLimit,
 				}
 				err1 := s.xrayApi.AddUser(string(oldInbound.Protocol), oldInbound.Tag, clientMap)
-				
+
 				if err1 == nil {
 					logger.Debug("Client added by api:", client.Email)
 				} else {
@@ -676,10 +768,13 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 	}
 	s.xrayApi.Close()
 
-	return needRestart, tx.Save(oldInbound).Error
+	return needRestart, nil
 }
 
 func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool, error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
+
 	oldInbound, err := s.GetInbound(inboundId)
 	if err != nil {
 		logger.Error("Load Old Data Error")
@@ -726,7 +821,11 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 
 	oldInbound.Settings = string(newSettings)
 
-	db := database.GetDB()
+	db := database.GetDB().Begin()
+	if db.Error != nil {
+		return false, db.Error
+	}
+	defer db.Rollback()
 
 	err = s.DelClientIPs(db, email)
 	if err != nil {
@@ -747,27 +846,41 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 			logger.Error("Delete stats Data Error")
 			return false, err
 		}
-		if needApiDel && notDepleted {
-			s.xrayApi.Init(p.GetAPIPort())
-			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, email)
-			if err1 == nil {
-				logger.Debug("Client deleted by api:", email)
-				needRestart = false
-			} else {
-				if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", email)) {
-					logger.Debug("User is already deleted. Nothing to do more...")
-				} else {
-					logger.Debug("Error in deleting client by api:", err1)
-					needRestart = true
-				}
-			}
-			s.xrayApi.Close()
-		}
+		needApiDel = needApiDel && notDepleted
 	}
-	return needRestart, db.Save(oldInbound).Error
+	if err = db.Save(oldInbound).Error; err != nil {
+		return false, err
+	}
+	if err = db.Commit().Error; err != nil {
+		return false, err
+	}
+	if needApiDel {
+		if p == nil {
+			return true, nil
+		}
+		if err = s.xrayApi.Init(p.GetAPIPort()); err != nil {
+			return true, nil
+		}
+		err1 := s.xrayApi.RemoveUser(oldInbound.Tag, email)
+		if err1 == nil {
+			logger.Debug("Client deleted by api:", email)
+			needRestart = false
+		} else {
+			if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", email)) {
+				logger.Debug("User is already deleted. Nothing to do more...")
+			} else {
+				logger.Debug("Error in deleting client by api:", err1)
+				needRestart = true
+			}
+		}
+		s.xrayApi.Close()
+	}
+	return needRestart, nil
 }
 
 func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId string) (bool, error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
 	clients, err := s.GetClients(data)
 	if err != nil {
 		return false, err
@@ -835,6 +948,19 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		return false, err
 	}
 	settingsClients := oldSettings["clients"].([]any)
+	preservedJSON, preserveErr := preserveMonthlyFields(oldInbound.Settings, data.Settings, clientIndex)
+	if preserveErr != nil {
+		return false, preserveErr
+	}
+	data.Settings = preservedJSON
+	clients, err = s.GetClients(data)
+	if err != nil {
+		return false, err
+	}
+	if err = json.Unmarshal([]byte(data.Settings), &settings); err != nil {
+		return false, err
+	}
+	interfaceClients = settings["clients"].([]any)
 	// Preserve created_at and set updated_at for the replacing client
 	var preservedCreated any
 	if clientIndex >= 0 && clientIndex < len(settingsClients) {
@@ -853,10 +979,10 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 			newMap["updated_at"] = time.Now().Unix() * 1000
 
 			// ↓↓↓↓↓↓  【重要补充】在这里手动确保 SpeedLimit 被写入数据库 ↓↓↓↓↓↓
-            // clients[0] 是从请求中解码出来的强类型对象，它的 SpeedLimit 字段是有值的。
-            // 我们把它手动赋值给即将用于保存的 newMap。
+			// clients[0] 是从请求中解码出来的强类型对象，它的 SpeedLimit 字段是有值的。
+			// 我们把它手动赋值给即将用于保存的 newMap。
 			newMap["speedLimit"] = clients[0].SpeedLimit // 中文注释：确保将 speedLimit 的值写入将要保存到数据库的 map 中。
-			
+
 			interfaceClients[0] = newMap
 		}
 	}
@@ -871,14 +997,10 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 	oldInbound.Settings = string(newSettings)
 	db := database.GetDB()
 	tx := db.Begin()
-
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	defer tx.Rollback()
 
 	if len(clients[0].Email) > 0 {
 		if len(oldEmail) > 0 {
@@ -891,7 +1013,7 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 				return false, err
 			}
 		} else {
-			s.AddClientStat(tx, data.Id, &clients[0])
+			if err = s.AddClientStat(tx, data.Id, &clients[0]); err != nil { return false, err }
 		}
 	} else {
 		err = s.DelClientStat(tx, oldEmail)
@@ -903,9 +1025,21 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 			return false, err
 		}
 	}
+	if err = tx.Save(oldInbound).Error; err != nil {
+		return false, err
+	}
+	if err = tx.Commit().Error; err != nil {
+		return false, err
+	}
+
 	needRestart := false
 	if len(oldEmail) > 0 {
-		s.xrayApi.Init(p.GetAPIPort())
+		if p == nil {
+			return true, nil
+		}
+		if err := s.xrayApi.Init(p.GetAPIPort()); err != nil {
+			return true, nil
+		}
 		if oldClients[clientIndex].Enable {
 			err1 := s.xrayApi.RemoveUser(oldInbound.Tag, oldEmail)
 			if err1 == nil {
@@ -933,11 +1067,11 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 				"flow":     clients[0].Flow,
 				"password": clients[0].Password,
 				"cipher":   cipher,
-				
-				"level":    clients[0].SpeedLimit,
+
+				"level": clients[0].SpeedLimit,
 			}
 			err1 := s.xrayApi.AddUser(string(oldInbound.Protocol), oldInbound.Tag, clientMap)
-			
+
 			if err1 == nil {
 				logger.Debug("Client edited by api:", clients[0].Email)
 			} else {
@@ -950,51 +1084,74 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		logger.Debug("Client old email not found")
 		needRestart = true
 	}
-	return needRestart, tx.Save(oldInbound).Error
+	return needRestart, nil
 }
 
+// AddTraffic applies supplied deltas, but cannot certify a core drain.
 func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic) (error, bool) {
-	var err error
-	db := database.GetDB()
-	tx := db.Begin()
+	return s.storeTraffic(inboundTraffics, clientTraffics, false)
+}
 
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
+func (s *InboundService) storeTraffic(inboundTraffics []*xray.Traffic, clientTraffics []*xray.ClientTraffic, drained bool) (error, bool) {
+	tx := database.GetDB().Begin()
+	if tx.Error != nil {
+		return tx.Error, false
+	}
+	defer tx.Rollback()
+	if err := s.addInboundTraffic(tx, inboundTraffics); err != nil {
+		return err, false
+	}
+	var resolveErr error
+	clientTraffics, resolveErr = resolveClientTraffic(tx, clientTraffics)
+	if resolveErr != nil { return resolveErr, false }
+	if err := s.addClientTraffic(tx, clientTraffics); err != nil {
+		return err, false
+	}
+	if drained {
+		if err := (&OutboundService{}).addOutboundTraffic(tx, inboundTraffics); err != nil {
+			return err, false
 		}
-	}()
-	err = s.addInboundTraffic(tx, inboundTraffics)
+	}
+	monthlyRestart := false
+	if drained {
+		location, err := (&SettingService{}).GetTimeLocation()
+		if err != nil {
+			return err, false
+		}
+		var resetErr error
+		monthlyRestart, resetErr = s.resetMonthlyClients(tx, time.Now().In(location))
+		if resetErr != nil {
+			return resetErr, false
+		}
+	}
+	var actions []func() bool
+	needRestart0, _, err := s.autoRenewClients(tx, &actions)
 	if err != nil {
 		return err, false
 	}
-	err = s.addClientTraffic(tx, clientTraffics)
+	needRestart1, _, err := s.disableInvalidClients(tx, &actions)
 	if err != nil {
 		return err, false
 	}
-
-	needRestart0, count, err := s.autoRenewClients(tx)
+	needRestart2, _, err := s.disableInvalidInbounds(tx, &actions)
 	if err != nil {
-		logger.Warning("Error in renew clients:", err)
-	} else if count > 0 {
-		logger.Debugf("%v clients renewed", count)
+		return err, false
 	}
-
-	needRestart1, count, err := s.disableInvalidClients(tx)
-	if err != nil {
-		logger.Warning("Error in disabling invalid clients:", err)
-	} else if count > 0 {
-		logger.Debugf("%v clients disabled", count)
+	if err := tx.Commit().Error; err != nil {
+		return err, false
 	}
-
-	needRestart2, count, err := s.disableInvalidInbounds(tx)
-	if err != nil {
-		logger.Warning("Error in disabling invalid inbounds:", err)
-	} else if count > 0 {
-		logger.Debugf("%v inbounds disabled", count)
+	if p != nil {
+		var online []string
+		for _, delta := range clientTraffics { if delta.Up + delta.Down > 0 { online = append(online, delta.Email) } }
+		p.SetOnlineClients(online)
 	}
-	return nil, (needRestart0 || needRestart1 || needRestart2)
+	restart := monthlyRestart || needRestart0 || needRestart1 || needRestart2
+	for _, action := range actions {
+		if action() {
+			restart = true
+		}
+	}
+	return nil, restart
 }
 
 func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic) error {
@@ -1006,12 +1163,16 @@ func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic
 
 	for _, traffic := range traffics {
 		if traffic.IsInbound {
-			err = tx.Model(&model.Inbound{}).Where("tag = ?", traffic.Tag).
+			result := tx.Model(&model.Inbound{}).Where("tag = ?", traffic.Tag).
 				Updates(map[string]any{
 					"up":       gorm.Expr("up + ?", traffic.Up),
 					"down":     gorm.Expr("down + ?", traffic.Down),
 					"all_time": gorm.Expr("COALESCE(all_time, 0) + ?", traffic.Up+traffic.Down),
-				}).Error
+				})
+			err = result.Error
+			if err == nil && result.RowsAffected == 0 {
+				err = addRetiredInboundTraffic(tx, traffic)
+			}
 			if err != nil {
 				return err
 			}
@@ -1022,14 +1183,9 @@ func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic
 
 func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) (err error) {
 	if len(traffics) == 0 {
-		// Empty onlineUsers
-		if p != nil {
-			p.SetOnlineClients(nil)
-		}
 		return nil
 	}
 
-	var onlineClients []string
 
 	emails := make([]string, 0, len(traffics))
 	for _, traffic := range traffics {
@@ -1060,25 +1216,19 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 
 				// Add user in onlineUsers array on traffic
 				if traffics[traffic_index].Up+traffics[traffic_index].Down > 0 {
-					onlineClients = append(onlineClients, traffics[traffic_index].Email)
 					dbClientTraffics[dbTraffic_index].LastOnline = time.Now().UnixMilli()
 				}
-				break
 			}
 		}
 	}
 
-	// Set onlineUsers
-	if p != nil {
-		p.SetOnlineClients(onlineClients)
-	}
 
 	err = tx.Save(dbClientTraffics).Error
 	if err != nil {
 		logger.Warning("AddClientTraffic update data ", err)
 	}
 
-	return nil
+	return err
 }
 
 func (s *InboundService) adjustTraffics(tx *gorm.DB, dbClientTraffics []*xray.ClientTraffic) ([]*xray.ClientTraffic, error) {
@@ -1133,13 +1283,14 @@ func (s *InboundService) adjustTraffics(tx *gorm.DB, dbClientTraffics []*xray.Cl
 		if err != nil {
 			logger.Warning("AddClientTraffic update inbounds ", err)
 			logger.Error(inbounds)
+			return nil, err
 		}
 	}
 
 	return dbClientTraffics, nil
 }
 
-func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
+func (s *InboundService) autoRenewClients(tx *gorm.DB, actions *[]func() bool) (bool, int64, error) {
 	// check for time expired
 	var traffics []*xray.ClientTraffic
 	now := time.Now().Unix() * 1000
@@ -1186,7 +1337,8 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 					traffics[traffic_index].ExpiryTime = newExpiryTime
 					traffics[traffic_index].Down = 0
 					traffics[traffic_index].Up = 0
-					if !traffic.Enable {
+					manualEnabled, _ := c["enable"].(bool)
+					if !traffic.Enable && manualEnabled {
 						traffics[traffic_index].Enable = true
 						clientsToAdd = append(clientsToAdd,
 							struct {
@@ -1219,23 +1371,32 @@ func (s *InboundService) autoRenewClients(tx *gorm.DB) (bool, int64, error) {
 	if err != nil {
 		return false, 0, err
 	}
-	if p != nil {
-		err1 = s.xrayApi.Init(p.GetAPIPort())
-		if err1 != nil {
-			return true, int64(len(traffics)), nil
+	*actions = append(*actions, func() bool {
+		if len(clientsToAdd) == 0 {
+			return false
 		}
-		for _, clientToAdd := range clientsToAdd {
-			err1 = s.xrayApi.AddUser(clientToAdd.protocol, clientToAdd.tag, clientToAdd.client)
+		if p == nil {
+			return true
+		}
+		if p != nil {
+			err1 = s.xrayApi.Init(p.GetAPIPort())
 			if err1 != nil {
-				needRestart = true
+				return true
 			}
+			for _, clientToAdd := range clientsToAdd {
+				err1 = s.xrayApi.AddUser(clientToAdd.protocol, clientToAdd.tag, clientToAdd.client)
+				if err1 != nil {
+					needRestart = true
+				}
+			}
+			s.xrayApi.Close()
 		}
-		s.xrayApi.Close()
-	}
+		return needRestart
+	})
 	return needRestart, int64(len(traffics)), nil
 }
 
-func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error) {
+func (s *InboundService) disableInvalidInbounds(tx *gorm.DB, actions *[]func() bool) (bool, int64, error) {
 	now := time.Now().Unix() * 1000
 	needRestart := false
 
@@ -1248,17 +1409,22 @@ func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error
 		if err != nil {
 			return false, 0, err
 		}
-		s.xrayApi.Init(p.GetAPIPort())
-		for _, tag := range tags {
-			err1 := s.xrayApi.DelInbound(tag)
-			if err1 == nil {
-				logger.Debug("Inbound disabled by api:", tag)
-			} else {
-				logger.Debug("Error in disabling inbound by api:", err1)
-				needRestart = true
+		*actions = append(*actions, func() bool {
+			if err := s.xrayApi.Init(p.GetAPIPort()); err != nil {
+				return true
 			}
-		}
-		s.xrayApi.Close()
+			for _, tag := range tags {
+				err1 := s.xrayApi.DelInbound(tag)
+				if err1 == nil {
+					logger.Debug("Inbound disabled by api:", tag)
+				} else {
+					logger.Debug("Error in disabling inbound by api:", err1)
+					needRestart = true
+				}
+			}
+			s.xrayApi.Close()
+			return needRestart
+		})
 	}
 
 	result := tx.Model(model.Inbound{}).
@@ -1269,7 +1435,7 @@ func (s *InboundService) disableInvalidInbounds(tx *gorm.DB) (bool, int64, error
 	return needRestart, count, err
 }
 
-func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, error) {
+func (s *InboundService) disableInvalidClients(tx *gorm.DB, actions *[]func() bool) (bool, int64, error) {
 	now := time.Now().Unix() * 1000
 	needRestart := false
 
@@ -1287,25 +1453,30 @@ func (s *InboundService) disableInvalidClients(tx *gorm.DB) (bool, int64, error)
 		if err != nil {
 			return false, 0, err
 		}
-		s.xrayApi.Init(p.GetAPIPort())
-		for _, result := range results {
-			err1 := s.xrayApi.RemoveUser(result.Tag, result.Email)
-			if err1 == nil {
-				logger.Debug("Client disabled by api:", result.Email)
-			} else {
-				if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", result.Email)) {
-					logger.Debug("User is already disabled. Nothing to do more...")
+		*actions = append(*actions, func() bool {
+			if err := s.xrayApi.Init(p.GetAPIPort()); err != nil {
+				return true
+			}
+			for _, result := range results {
+				err1 := s.xrayApi.RemoveUser(result.Tag, result.Email)
+				if err1 == nil {
+					logger.Debug("Client disabled by api:", result.Email)
 				} else {
 					if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", result.Email)) {
 						logger.Debug("User is already disabled. Nothing to do more...")
 					} else {
-						logger.Debug("Error in disabling client by api:", err1)
-						needRestart = true
+						if strings.Contains(err1.Error(), fmt.Sprintf("User %s not found.", result.Email)) {
+							logger.Debug("User is already disabled. Nothing to do more...")
+						} else {
+							logger.Debug("Error in disabling client by api:", err1)
+							needRestart = true
+						}
 					}
 				}
 			}
-		}
-		s.xrayApi.Close()
+			s.xrayApi.Close()
+			return needRestart
+		})
 	}
 	result := tx.Model(xray.ClientTraffic{}).
 		Where("((total > 0 and up + down >= total) or (expiry_time > 0 and expiry_time <= ?)) and enable = ?", now, true).
@@ -1339,6 +1510,7 @@ func (s *InboundService) MigrationRemoveOrphanedTraffics() {
 }
 
 func (s *InboundService) AddClientStat(tx *gorm.DB, inboundId int, client *model.Client) error {
+	if err := reserveTrafficIdentity(tx, "client", client.Email); err != nil { return err }
 	clientTraffic := xray.ClientTraffic{}
 	clientTraffic.InboundId = inboundId
 	clientTraffic.Email = client.Email
@@ -1348,20 +1520,32 @@ func (s *InboundService) AddClientStat(tx *gorm.DB, inboundId int, client *model
 	clientTraffic.Up = 0
 	clientTraffic.Down = 0
 	clientTraffic.Reset = client.Reset
+	day, at, enrollmentErr := monthlyEnrollment(tx, client)
+	if enrollmentErr != nil { return enrollmentErr }
+	clientTraffic.MonthlyResetDay = day
+	clientTraffic.MonthlyResetAt = at
 	result := tx.Create(&clientTraffic)
 	err := result.Error
 	return err
 }
 
 func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *model.Client) error {
+	if err := renameTrafficIdentity(tx, email, client.Email); err != nil { return err }
+	day, at, enrollmentErr := monthlyEnrollment(tx, client)
+	if enrollmentErr != nil { return enrollmentErr }
+	var old xray.ClientTraffic
+	if err := tx.Where("email = ?", email).First(&old).Error; err != nil { return err }
+	if old.MonthlyResetDay == day && old.MonthlyResetAt != 0 { at = old.MonthlyResetAt }
 	result := tx.Model(xray.ClientTraffic{}).
 		Where("email = ?", email).
 		Updates(map[string]any{
-			"enable":      true,
+			"enable":      client.Enable,
 			"email":       client.Email,
 			"total":       client.TotalGB,
 			"expiry_time": client.ExpiryTime,
 			"reset":       client.Reset,
+			"monthly_reset_day": day,
+			"monthly_reset_at": at,
 		})
 	err := result.Error
 	return err
@@ -1372,7 +1556,7 @@ func (s *InboundService) UpdateClientIPs(tx *gorm.DB, oldEmail string, newEmail 
 }
 
 func (s *InboundService) DelClientStat(tx *gorm.DB, email string) error {
-	return tx.Where("email = ?", email).Delete(xray.ClientTraffic{}).Error
+	return retireClient(tx, email)
 }
 
 func (s *InboundService) DelClientIPs(tx *gorm.DB, email string) error {
@@ -1787,7 +1971,18 @@ func (s *InboundService) ResetClientTraffic(id int, clientEmail string) (bool, e
 		return false, err
 	}
 
-	if !traffic.Enable {
+	wasEnabled := traffic.Enable
+	traffic.Up = 0
+	traffic.Down = 0
+	traffic.Enable = true
+
+	db := database.GetDB()
+	err = db.Save(traffic).Error
+	if err != nil {
+		return false, err
+	}
+
+	if !wasEnabled {
 		inbound, err := s.GetInbound(id)
 		if err != nil {
 			return false, err
@@ -1798,7 +1993,12 @@ func (s *InboundService) ResetClientTraffic(id int, clientEmail string) (bool, e
 		}
 		for _, client := range clients {
 			if client.Email == clientEmail && client.Enable {
-				s.xrayApi.Init(p.GetAPIPort())
+				if p == nil {
+					return true, nil
+				}
+				if err = s.xrayApi.Init(p.GetAPIPort()); err != nil {
+					return true, nil
+				}
 				cipher := ""
 				if string(inbound.Protocol) == "shadowsocks" {
 					var oldSettings map[string]any
@@ -1826,16 +2026,6 @@ func (s *InboundService) ResetClientTraffic(id int, clientEmail string) (bool, e
 				break
 			}
 		}
-	}
-
-	traffic.Up = 0
-	traffic.Down = 0
-	traffic.Enable = true
-
-	db := database.GetDB()
-	err = db.Save(traffic).Error
-	if err != nil {
-		return false, err
 	}
 
 	return needRestart, nil
@@ -1871,15 +2061,14 @@ func (s *InboundService) ResetAllTraffics() error {
 }
 
 func (s *InboundService) DelDepletedClients(id int) (err error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
 	db := database.GetDB()
 	tx := db.Begin()
-	defer func() {
-		if err == nil {
-			tx.Commit()
-		} else {
-			tx.Rollback()
-		}
-	}()
+	if tx.Error != nil {
+		return tx.Error
+	}
+	defer tx.Rollback()
 
 	whereText := "reset = 0 and inbound_id "
 	if id < 0 {
@@ -1921,6 +2110,9 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 				newClients = append(newClients, client)
 			}
 		}
+		for _, email := range emails {
+			if err := retireClient(tx, email); err != nil { return err }
+		}
 		if len(newClients) > 0 {
 			oldSettings["clients"] = newClients
 
@@ -1936,7 +2128,13 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 			}
 		} else {
 			// Delete inbound if no client remains
-			s.DelInbound(depletedClient.InboundId)
+			if err = retireInbound(tx, oldInbound); err != nil { return err }
+			if err = tx.Delete(&model.Inbound{}, depletedClient.InboundId).Error; err != nil {
+				return err
+			}
+			if err = tx.Where("inbound_id = ?", depletedClient.InboundId).Delete(&xray.ClientTraffic{}).Error; err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1945,6 +2143,12 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 		return err
 	}
 
+	if err = tx.Commit().Error; err != nil {
+		return err
+	}
+	if len(depletedClients) > 0 {
+		(&XrayService{}).SetToNeedRestart()
+	}
 	return nil
 }
 
