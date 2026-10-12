@@ -61,4 +61,14 @@ git rev-parse 'v26.9.13^{commit}'
 git switch -c integration/review-v26.9.13 v26.9.13
 ```
 
-未来版本用核查过的 tag 与新分支名，不盲用 `latest`；先跑上游基线，再在单独功能分支迁移/解决冲突，执行下游回归、故障注入、隔离 API/UI 和目标平台/回滚验收，独立 review 后才决定 merge/release/deploy。继承 `release.yml` 可由 main 源码变更、发布或手工触发；`docker.yml` 可由版本 tag/手工触发并指向上游 namespace。不要手工 dispatch 或 push tag 来试验文档。
+未来版本用核查过的 tag 与新分支名，不盲用 `latest`；先跑上游基线，再在单独功能分支迁移/解决冲突，执行下游回归、故障注入、隔离 API/UI 和目标平台/回滚验收，独立 review 后才决定 merge/release/deploy。继承 `release.yml` 与 `docker.yml` 已改为仅显式手动触发，main push、合并、tag 和上游发布均不会自动发行或部署；脚本仍含上游资产或发布 namespace，手动使用前须另行审计。不要手工 dispatch 或 push tag 来试验文档。
+
+## 维护与发行状态
+
+本仓库是本派生版今后的维护与发行来源。main 已集成上游免费 `v26.9.13`、下游功能与文档：PR #1（上游同步）、#2（功能）、#3（文档）、#4（工作流安全）和 #5（维护状态）均已合并。保留 integration/feature/docs 分支及原提交身份，不改写历史。
+
+已验收候选源码为 `f4f351adef059040cab935492640920e947ba186`；后续 main 合并及文档/CI 提交不等于重新验收或替换该包。面板内部版本仍为 `26.9.13`，不能独自识别派生版。既有受控部署或本地交付包不是公开发行；[Releases](https://github.com/luhaihui106/X-Panel-WH/releases) 当前为空。
+
+今后上游更新先进入新的 integration 分支，经上游/下游回归、独立审查和隔离验收后再合并 main；正式发布另行批准。计划采用独立派生标签（例如 `v26.9.13-wh.1`，仅为命名示例，尚未创建），同时记录上游基线、精确源码提交和包校验值，不冒充上游版本。
+
+流量实现及风险详见[月重置说明](downstream-monthly-reset.md)、[身份归档](traffic-identity-retirement.md)与[兼容性门禁](compatibility.md)。退休身份与统计归档持久保留，不自动 GC；HEAD 凭据清理不代表凭据已撤销、历史已清除或完成全仓安全审计。
