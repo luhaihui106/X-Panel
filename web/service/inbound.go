@@ -83,17 +83,21 @@ func (s *InboundService) checkPortExist(listen string, port int, ignoreId int) (
 }
 
 func (s *InboundService) GetClients(inbound *model.Inbound) ([]model.Client, error) {
-	settings := map[string][]model.Client{}
-	json.Unmarshal([]byte(inbound.Settings), &settings)
-	if settings == nil {
-		return nil, fmt.Errorf("setting is null")
+	// Validate only the new fields strictly. Legacy UI sends tgId as a string;
+	// retain upstream's permissive decoding for existing fields.
+	var validation struct { Clients []struct {
+		MonthlyResetEnabled bool `json:"monthlyResetEnabled"`
+		MonthlyResetDay int `json:"monthlyResetDay"`
+	} `json:"clients"` }
+	if err := json.Unmarshal([]byte(inbound.Settings), &validation); err != nil { return nil, err }
+	for _, client := range validation.Clients {
+		if client.MonthlyResetEnabled && (client.MonthlyResetDay < 1 || client.MonthlyResetDay > 31) {
+			return nil, fmt.Errorf("monthlyResetDay must be an integer from 1 to 31")
+		}
 	}
-
-	clients := settings["clients"]
-	if clients == nil {
-		return nil, nil
-	}
-	return clients, nil
+	var settings struct { Clients []model.Client `json:"clients"` }
+	_ = json.Unmarshal([]byte(inbound.Settings), &settings)
+	return settings.Clients, nil
 }
 
 func (s *InboundService) getAllEmails() ([]string, error) {
@@ -380,6 +384,8 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	if err != nil {
 		return inbound, false, err
 	}
+	inbound.Settings, err = preserveMonthlyFields(oldInbound.Settings, inbound.Settings)
+	if err != nil { return inbound, false, err }
 
 	tag := oldInbound.Tag
 
@@ -835,6 +841,13 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		return false, err
 	}
 	settingsClients := oldSettings["clients"].([]any)
+	preservedJSON, preserveErr := preserveMonthlyFields(oldInbound.Settings, data.Settings)
+	if preserveErr != nil { return false, preserveErr }
+	data.Settings = preservedJSON
+	clients, err = s.GetClients(data)
+	if err != nil { return false, err }
+	if err = json.Unmarshal([]byte(data.Settings), &settings); err != nil { return false, err }
+	interfaceClients = settings["clients"].([]any)
 	// Preserve created_at and set updated_at for the replacing client
 	var preservedCreated any
 	if clientIndex >= 0 && clientIndex < len(settingsClients) {
@@ -974,6 +987,13 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 		return err, false
 	}
 
+	// The existing 10-second traffic job drains core counters before this reset.
+	// Keeping reset in the same transaction prevents stale counters being added back.
+	location, locationErr := (&SettingService{}).GetTimeLocation()
+	if locationErr != nil { err = locationErr; return err, false }
+	monthlyRestart, monthlyErr := s.resetMonthlyClients(tx, time.Now().In(location))
+	if monthlyErr != nil { err = monthlyErr; return err, false }
+
 	needRestart0, count, err := s.autoRenewClients(tx)
 	if err != nil {
 		logger.Warning("Error in renew clients:", err)
@@ -994,7 +1014,7 @@ func (s *InboundService) AddTraffic(inboundTraffics []*xray.Traffic, clientTraff
 	} else if count > 0 {
 		logger.Debugf("%v inbounds disabled", count)
 	}
-	return nil, (needRestart0 || needRestart1 || needRestart2)
+	return nil, (monthlyRestart || needRestart0 || needRestart1 || needRestart2)
 }
 
 func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic) error {
@@ -1348,12 +1368,21 @@ func (s *InboundService) AddClientStat(tx *gorm.DB, inboundId int, client *model
 	clientTraffic.Up = 0
 	clientTraffic.Down = 0
 	clientTraffic.Reset = client.Reset
+	day, at, enrollmentErr := monthlyEnrollment(tx, client)
+	if enrollmentErr != nil { return enrollmentErr }
+	clientTraffic.MonthlyResetDay = day
+	clientTraffic.MonthlyResetAt = at
 	result := tx.Create(&clientTraffic)
 	err := result.Error
 	return err
 }
 
 func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *model.Client) error {
+	day, at, enrollmentErr := monthlyEnrollment(tx, client)
+	if enrollmentErr != nil { return enrollmentErr }
+	var old xray.ClientTraffic
+	if err := tx.Where("email = ?", email).First(&old).Error; err != nil { return err }
+	if old.MonthlyResetDay == day && old.MonthlyResetAt != 0 { at = old.MonthlyResetAt }
 	result := tx.Model(xray.ClientTraffic{}).
 		Where("email = ?", email).
 		Updates(map[string]any{
@@ -1362,6 +1391,8 @@ func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *mod
 			"total":       client.TotalGB,
 			"expiry_time": client.ExpiryTime,
 			"reset":       client.Reset,
+			"monthly_reset_day": day,
+			"monthly_reset_at": at,
 		})
 	err := result.Error
 	return err

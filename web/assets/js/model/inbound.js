@@ -1901,7 +1901,9 @@ Inbound.VmessSettings.VMESS = class extends XrayCommonClass {
         comment = '',
         reset = 0,
         created_at = undefined,
-        updated_at = undefined
+        updated_at = undefined,
+        monthlyResetEnabled = false,
+        monthlyResetDay = 1
     ) {
         super();
         this.id = id;
@@ -1916,6 +1918,8 @@ Inbound.VmessSettings.VMESS = class extends XrayCommonClass {
         this.subId = subId;
         this.comment = comment;
         this.reset = reset;
+        this.monthlyResetEnabled = monthlyResetEnabled;
+        this.monthlyResetDay = monthlyResetDay;
         this.created_at = created_at;
         this.updated_at = updated_at;
     }
@@ -1937,6 +1941,8 @@ Inbound.VmessSettings.VMESS = class extends XrayCommonClass {
             json.reset,
             json.created_at,
             json.updated_at,
+            json.monthlyResetEnabled ?? false,
+            json.monthlyResetDay ?? 1,
         );
     }
     get _expiryTime() {
@@ -2059,7 +2065,9 @@ Inbound.VLESSSettings.VLESS = class extends XrayCommonClass {
         comment = '',
         reset = 0,
         created_at = undefined,
-        updated_at = undefined
+        updated_at = undefined,
+        monthlyResetEnabled = false,
+        monthlyResetDay = 1
     ) {
         super();
         this.id = id;
@@ -2074,6 +2082,8 @@ Inbound.VLESSSettings.VLESS = class extends XrayCommonClass {
         this.subId = subId;
         this.comment = comment;
         this.reset = reset;
+        this.monthlyResetEnabled = monthlyResetEnabled;
+        this.monthlyResetDay = monthlyResetDay;
         this.created_at = created_at;
         this.updated_at = updated_at;
     }
@@ -2095,6 +2105,8 @@ Inbound.VLESSSettings.VLESS = class extends XrayCommonClass {
             json.reset,
             json.created_at,
             json.updated_at,
+            json.monthlyResetEnabled ?? false,
+            json.monthlyResetDay ?? 1,
         );
     }
 
@@ -2208,7 +2220,9 @@ Inbound.TrojanSettings.Trojan = class extends XrayCommonClass {
         comment = '',
         reset = 0,
         created_at = undefined,
-        updated_at = undefined
+        updated_at = undefined,
+        monthlyResetEnabled = false,
+        monthlyResetDay = 1
     ) {
         super();
         this.password = password;
@@ -2222,6 +2236,8 @@ Inbound.TrojanSettings.Trojan = class extends XrayCommonClass {
         this.subId = subId;
         this.comment = comment;
         this.reset = reset;
+        this.monthlyResetEnabled = monthlyResetEnabled;
+        this.monthlyResetDay = monthlyResetDay;
         this.created_at = created_at;
         this.updated_at = updated_at;
     }
@@ -2239,6 +2255,8 @@ Inbound.TrojanSettings.Trojan = class extends XrayCommonClass {
             subId: this.subId,
             comment: this.comment,
             reset: this.reset,
+            monthlyResetEnabled: this.monthlyResetEnabled,
+            monthlyResetDay: this.monthlyResetDay,
             created_at: this.created_at,
             updated_at: this.updated_at,
         };
@@ -2259,6 +2277,8 @@ Inbound.TrojanSettings.Trojan = class extends XrayCommonClass {
             json.reset,
             json.created_at,
             json.updated_at,
+            json.monthlyResetEnabled ?? false,
+            json.monthlyResetDay ?? 1,
         );
     }
 
@@ -2381,7 +2401,9 @@ Inbound.ShadowsocksSettings.Shadowsocks = class extends XrayCommonClass {
         comment = '',
         reset = 0,
         created_at = undefined,
-        updated_at = undefined
+        updated_at = undefined,
+        monthlyResetEnabled = false,
+        monthlyResetDay = 1
     ) {
         super();
         this.method = method;
@@ -2396,6 +2418,8 @@ Inbound.ShadowsocksSettings.Shadowsocks = class extends XrayCommonClass {
         this.subId = subId;
         this.comment = comment;
         this.reset = reset;
+        this.monthlyResetEnabled = monthlyResetEnabled;
+        this.monthlyResetDay = monthlyResetDay;
         this.created_at = created_at;
         this.updated_at = updated_at;
     }
@@ -2414,6 +2438,8 @@ Inbound.ShadowsocksSettings.Shadowsocks = class extends XrayCommonClass {
             subId: this.subId,
             comment: this.comment,
             reset: this.reset,
+            monthlyResetEnabled: this.monthlyResetEnabled,
+            monthlyResetDay: this.monthlyResetDay,
             created_at: this.created_at,
             updated_at: this.updated_at,
         };
@@ -2435,6 +2461,8 @@ Inbound.ShadowsocksSettings.Shadowsocks = class extends XrayCommonClass {
             json.reset,
             json.created_at,
             json.updated_at,
+            json.monthlyResetEnabled ?? false,
+            json.monthlyResetDay ?? 1,
         );
     }
 

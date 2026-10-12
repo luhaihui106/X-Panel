@@ -1,0 +1,23 @@
+name: Downstream validation
+on:
+  push:
+    branches: ['feat/**', 'integration/**']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Upstream has two pre-existing go-vet failures, documented below.
+      - run: go test -vet=off ./...
+      - run: go test -vet=off -race ./web/service -run TestMonthly
+      - run: node web/assets/js/model/monthly-reset.test.cjs
+      - run: go build -o "$RUNNER_TEMP/x-panel" .
