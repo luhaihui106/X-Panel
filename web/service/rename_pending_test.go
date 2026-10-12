@@ -23,7 +23,7 @@ func TestUnknownDrainedIdentityRetainsBatch(t *testing.T) {
 	}
 }
 
-func TestRunningCoreRejectsIdentityRename(t *testing.T) {
+func TestRunningCoreAliasesIdentityRename(t *testing.T) {
 	s, c := reviewDB(t, true, false)
 	commitCore(t, false)
 	v := reflect.ValueOf(p).Elem().FieldByName("cmd")
@@ -32,20 +32,20 @@ func TestRunningCoreRejectsIdentityRename(t *testing.T) {
 	defer reflect.NewAt(v.Type(), unsafe.Pointer(v.UnsafeAddr())).Elem().Set(reflect.Zero(v.Type()))
 	c.Email = "running-renamed"
 	raw, _ := json.Marshal(map[string]any{"clients": []model.Client{c}})
-	if _, e := s.UpdateInboundClient(&model.Inbound{Id: 1, Settings: string(raw)}, c.ID); e == nil {
-		t.Fatal("running core rename accepted")
+	if _, e := s.UpdateInboundClient(&model.Inbound{Id: 1, Settings: string(raw)}, c.ID); e != nil {
+		t.Fatal(e)
 	}
 	in, _ := s.GetInbound(1)
 	in.Settings = string(raw)
-	if _, _, e := s.UpdateInbound(in); e == nil {
-		t.Fatal("running bulk rename accepted")
+	if _, _, e := s.UpdateInbound(in); e != nil {
+		t.Fatal(e)
 	}
-	if reviewStat(t).Email != "review" {
-		t.Fatal("refused rename changed statistics")
+	if reviewStat(t).Email != "running-renamed" {
+		t.Fatal("rename did not migrate statistics")
 	}
 }
 
-func TestPendingDrainRejectsRenameUntilSuccessfulRetry(t *testing.T) {
+func TestPendingDrainFollowsRenameThroughSuccessfulRetry(t *testing.T) {
 	for _, bulk := range []bool{false, true} {
 		t.Run(map[bool]string{false: "client", true: "inbound"}[bulk], func(t *testing.T) {
 			s, c := reviewDB(t, true, false)
@@ -75,20 +75,17 @@ func TestPendingDrainRejectsRenameUntilSuccessfulRetry(t *testing.T) {
 			}
 			p = xray.NewProcess(&xray.Config{})
 			t.Cleanup(func() { p = nil })
-			if e := edit(); e == nil {
-				t.Fatal("rename accepted with retained old identity batch")
+			if e := edit(); e != nil {
+				t.Fatal(e)
 			}
-			if reviewStat(t).Email != "review" || scheduledTraffic.pending == nil {
-				t.Fatal("failed rename changed identity or discarded batch")
+			if reviewStat(t).Email != "renamed" || scheduledTraffic.pending == nil {
+				t.Fatal("rename failed to preserve pending ownership")
 			}
 			db.Exec(`DROP TRIGGER rename_delta`)
 			if e, _ := s.CollectTraffic(func() ([]*xray.Traffic, []*xray.ClientTraffic, error) {
 				t.Fatal("retry must not drain again")
 				return nil, nil, nil
 			}); e != nil {
-				t.Fatal(e)
-			}
-			if e := edit(); e != nil {
 				t.Fatal(e)
 			}
 			v := reviewStat(t)

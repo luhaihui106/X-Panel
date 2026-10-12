@@ -170,6 +170,9 @@ func (s *InboundService) checkEmailExistForInbound(inbound *model.Inbound) (stri
 
 // AddInbound adds a new inbound to db
 func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
+	if err := reserveTrafficIdentity(database.GetDB(), "inbound", inbound.Tag); err != nil { return inbound, false, err }
 	// 中文注释：检查端口是否已存在
 	exist, err := s.checkPortExist(inbound.Listen, inbound.Port, 0)
 	if err != nil {
@@ -286,6 +289,10 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 					return inbound, false, err
 				}
 			}
+		} else {
+			for _, stat := range inbound.ClientStats {
+				if err := reserveTrafficIdentity(tx, "client", stat.Email); err != nil { return inbound, false, err }
+			}
 		}
 	} else {
 		return inbound, false, err
@@ -327,13 +334,11 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 func (s *InboundService) DelInbound(id int) (bool, error) {
 	scheduledTraffic.mu.Lock()
 	defer scheduledTraffic.mu.Unlock()
-	if scheduledTraffic.pending != nil {
-		return false, fmt.Errorf("traffic batch awaiting retry; identity mutation refused")
-	}
 
 	db := database.GetDB()
 
 	inbound, err := s.GetInbound(id)
+	if err == gorm.ErrRecordNotFound { return false, nil }
 	if err != nil {
 		return false, err
 	}
@@ -344,8 +349,8 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 	}
 	defer tx.Rollback()
 
-	// Delete client traffics of inbounds
-	err = tx.Where("inbound_id = ?", id).Delete(xray.ClientTraffic{}).Error
+	// Retire ownership in the same transaction as live deletion.
+	err = retireInbound(tx, inbound)
 	if err != nil {
 		return false, err
 	}
@@ -392,9 +397,6 @@ func (s *InboundService) GetInbound(id int) (*model.Inbound, error) {
 func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
 	scheduledTraffic.mu.Lock()
 	defer scheduledTraffic.mu.Unlock()
-	if scheduledTraffic.pending != nil {
-		return inbound, false, fmt.Errorf("traffic batch awaiting retry; identity mutation refused")
-	}
 
 	exist, err := s.checkPortExist(inbound.Listen, inbound.Port, inbound.Id)
 	if err != nil {
@@ -407,9 +409,6 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	oldInbound, err := s.GetInbound(inbound.Id)
 	if err != nil {
 		return inbound, false, err
-	}
-	if p != nil && p.IsRunning() && clientIdentitiesChanged(oldInbound.Settings, inbound.Settings) {
-		return inbound, false, fmt.Errorf("stop Xray and collect final counters before changing client identities")
 	}
 	inbound.Settings, err = preserveMonthlyFields(oldInbound.Settings, inbound.Settings)
 	if err != nil {
@@ -510,6 +509,7 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		oldInbound.Tag = fmt.Sprintf("inbound-%v:%v", inbound.Listen, inbound.Port)
 	}
 
+	if err = renameInboundIdentity(tx, tag, oldInbound.Tag); err != nil { return inbound, false, err }
 	if err = tx.Save(oldInbound).Error; err != nil {
 		return inbound, false, err
 	}
@@ -594,6 +594,8 @@ func (s *InboundService) updateClientTraffics(tx *gorm.DB, oldInbound *model.Inb
 }
 
 func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
+	scheduledTraffic.mu.Lock()
+	defer scheduledTraffic.mu.Unlock()
 	clients, err := s.GetClients(data)
 	if err != nil {
 		return false, err
@@ -743,9 +745,6 @@ func (s *InboundService) AddInboundClient(data *model.Inbound) (bool, error) {
 func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool, error) {
 	scheduledTraffic.mu.Lock()
 	defer scheduledTraffic.mu.Unlock()
-	if scheduledTraffic.pending != nil {
-		return false, fmt.Errorf("traffic batch awaiting retry; identity mutation refused")
-	}
 
 	oldInbound, err := s.GetInbound(inboundId)
 	if err != nil {
@@ -853,9 +852,6 @@ func (s *InboundService) DelInboundClient(inboundId int, clientId string) (bool,
 func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId string) (bool, error) {
 	scheduledTraffic.mu.Lock()
 	defer scheduledTraffic.mu.Unlock()
-	if scheduledTraffic.pending != nil {
-		return false, fmt.Errorf("traffic batch awaiting retry; client edit refused")
-	}
 	clients, err := s.GetClients(data)
 	if err != nil {
 		return false, err
@@ -969,9 +965,6 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 		return false, err
 	}
 
-	if p != nil && p.IsRunning() && clientIdentitiesChanged(oldInbound.Settings, string(newSettings)) {
-		return false, fmt.Errorf("stop Xray and collect final counters before changing client identities")
-	}
 	oldInbound.Settings = string(newSettings)
 	db := database.GetDB()
 	tx := db.Begin()
@@ -991,7 +984,7 @@ func (s *InboundService) UpdateInboundClient(data *model.Inbound, clientId strin
 				return false, err
 			}
 		} else {
-			s.AddClientStat(tx, data.Id, &clients[0])
+			if err = s.AddClientStat(tx, data.Id, &clients[0]); err != nil { return false, err }
 		}
 	} else {
 		err = s.DelClientStat(tx, oldEmail)
@@ -1079,20 +1072,9 @@ func (s *InboundService) storeTraffic(inboundTraffics []*xray.Traffic, clientTra
 	if err := s.addInboundTraffic(tx, inboundTraffics); err != nil {
 		return err, false
 	}
-	if drained {
-		for _, traffic := range clientTraffics {
-			if traffic.Up == 0 && traffic.Down == 0 {
-				continue
-			}
-			var count int64
-			if err := tx.Model(&xray.ClientTraffic{}).Where("email = ?", traffic.Email).Count(&count).Error; err != nil {
-				return err, false
-			}
-			if count != 1 {
-				return fmt.Errorf("drained client identity %q has %d statistics rows; batch retained", traffic.Email, count), false
-			}
-		}
-	}
+	var resolveErr error
+	clientTraffics, resolveErr = resolveClientTraffic(tx, clientTraffics)
+	if resolveErr != nil { return resolveErr, false }
 	if err := s.addClientTraffic(tx, clientTraffics); err != nil {
 		return err, false
 	}
@@ -1129,6 +1111,11 @@ func (s *InboundService) storeTraffic(inboundTraffics []*xray.Traffic, clientTra
 	if err := tx.Commit().Error; err != nil {
 		return err, false
 	}
+	if p != nil {
+		var online []string
+		for _, delta := range clientTraffics { if delta.Up + delta.Down > 0 { online = append(online, delta.Email) } }
+		p.SetOnlineClients(online)
+	}
 	restart := monthlyRestart || needRestart0 || needRestart1 || needRestart2
 	for _, action := range actions {
 		if action() {
@@ -1147,12 +1134,16 @@ func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic
 
 	for _, traffic := range traffics {
 		if traffic.IsInbound {
-			err = tx.Model(&model.Inbound{}).Where("tag = ?", traffic.Tag).
+			result := tx.Model(&model.Inbound{}).Where("tag = ?", traffic.Tag).
 				Updates(map[string]any{
 					"up":       gorm.Expr("up + ?", traffic.Up),
 					"down":     gorm.Expr("down + ?", traffic.Down),
 					"all_time": gorm.Expr("COALESCE(all_time, 0) + ?", traffic.Up+traffic.Down),
-				}).Error
+				})
+			err = result.Error
+			if err == nil && result.RowsAffected == 0 {
+				err = addRetiredInboundTraffic(tx, traffic)
+			}
 			if err != nil {
 				return err
 			}
@@ -1163,14 +1154,9 @@ func (s *InboundService) addInboundTraffic(tx *gorm.DB, traffics []*xray.Traffic
 
 func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTraffic) (err error) {
 	if len(traffics) == 0 {
-		// Empty onlineUsers
-		if p != nil {
-			p.SetOnlineClients(nil)
-		}
 		return nil
 	}
 
-	var onlineClients []string
 
 	emails := make([]string, 0, len(traffics))
 	for _, traffic := range traffics {
@@ -1201,18 +1187,12 @@ func (s *InboundService) addClientTraffic(tx *gorm.DB, traffics []*xray.ClientTr
 
 				// Add user in onlineUsers array on traffic
 				if traffics[traffic_index].Up+traffics[traffic_index].Down > 0 {
-					onlineClients = append(onlineClients, traffics[traffic_index].Email)
 					dbClientTraffics[dbTraffic_index].LastOnline = time.Now().UnixMilli()
 				}
-				break
 			}
 		}
 	}
 
-	// Set onlineUsers
-	if p != nil {
-		p.SetOnlineClients(onlineClients)
-	}
 
 	err = tx.Save(dbClientTraffics).Error
 	if err != nil {
@@ -1501,6 +1481,7 @@ func (s *InboundService) MigrationRemoveOrphanedTraffics() {
 }
 
 func (s *InboundService) AddClientStat(tx *gorm.DB, inboundId int, client *model.Client) error {
+	if err := reserveTrafficIdentity(tx, "client", client.Email); err != nil { return err }
 	clientTraffic := xray.ClientTraffic{}
 	clientTraffic.InboundId = inboundId
 	clientTraffic.Email = client.Email
@@ -1520,6 +1501,7 @@ func (s *InboundService) AddClientStat(tx *gorm.DB, inboundId int, client *model
 }
 
 func (s *InboundService) UpdateClientStat(tx *gorm.DB, email string, client *model.Client) error {
+	if err := renameTrafficIdentity(tx, email, client.Email); err != nil { return err }
 	day, at, enrollmentErr := monthlyEnrollment(tx, client)
 	if enrollmentErr != nil { return enrollmentErr }
 	var old xray.ClientTraffic
@@ -1545,7 +1527,7 @@ func (s *InboundService) UpdateClientIPs(tx *gorm.DB, oldEmail string, newEmail 
 }
 
 func (s *InboundService) DelClientStat(tx *gorm.DB, email string) error {
-	return tx.Where("email = ?", email).Delete(xray.ClientTraffic{}).Error
+	return retireClient(tx, email)
 }
 
 func (s *InboundService) DelClientIPs(tx *gorm.DB, email string) error {
@@ -2052,9 +2034,6 @@ func (s *InboundService) ResetAllTraffics() error {
 func (s *InboundService) DelDepletedClients(id int) (err error) {
 	scheduledTraffic.mu.Lock()
 	defer scheduledTraffic.mu.Unlock()
-	if scheduledTraffic.pending != nil {
-		return fmt.Errorf("traffic batch awaiting retry; cleanup refused")
-	}
 	db := database.GetDB()
 	tx := db.Begin()
 	if tx.Error != nil {
@@ -2102,6 +2081,9 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 				newClients = append(newClients, client)
 			}
 		}
+		for _, email := range emails {
+			if err := retireClient(tx, email); err != nil { return err }
+		}
 		if len(newClients) > 0 {
 			oldSettings["clients"] = newClients
 
@@ -2117,6 +2099,7 @@ func (s *InboundService) DelDepletedClients(id int) (err error) {
 			}
 		} else {
 			// Delete inbound if no client remains
+			if err = retireInbound(tx, oldInbound); err != nil { return err }
 			if err = tx.Delete(&model.Inbound{}, depletedClient.InboundId).Error; err != nil {
 				return err
 			}

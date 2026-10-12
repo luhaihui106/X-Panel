@@ -41,7 +41,7 @@ func TestMonthlyScheduleSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = db.AutoMigrate(&xray.ClientTraffic{}, &model.Setting{}); err != nil {
+	if err = db.AutoMigrate(&xray.ClientTraffic{}, &model.Setting{}, &model.TrafficIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	s := InboundService{}
