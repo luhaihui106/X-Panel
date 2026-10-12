@@ -39,13 +39,15 @@ or proprietary source are used or bypassed.
   error), clears the batch exactly once, and the existing traffic job schedules
   reconciliation from committed DB configuration. Restart is asynchronous and may
   fail; this is not atomic DB/core consistency or immediate compensation.
-- Client and inbound edits/deletes share the scheduled collector mutex. A retained
-  failed batch refuses identity mutations until a successful scheduled retry;
-  unmatched nonzero client deltas fail and remain pending instead of being lost.
-  Email/protocol-key changes are refused while Xray is running, because a drain
-  followed by a live rename still races new old-identity counters. Collect final
-  counters before stopping Xray, then edit; stopping/restarting itself retains the
-  upstream destructive-counter crash/stop limitation. No crash durability is claimed.
+- Client and inbound edits/deletes share the scheduled collector mutex. Persistent
+  email aliases migrate ownership on rename, including retained failed batches and
+  late old-email counters while Xray runs. Removal atomically archives statistics
+  and ownership; known retired counters settle alongside healthy-client deltas.
+  Retired emails and inbound tags remain reserved against unsafe reuse; ordinary
+  edits are not globally banned merely because a batch is pending. Truly unknown
+  nonzero identities still fail closed and retain the whole batch, blocking further
+  collection/monthly resets until resolved. These records do not close the
+  destructive-read-to-commit crash window. See traffic-identity-retirement.md.
 - Older API callers omitting both fields on edits retain existing values;
   explicit false disables. Old exports without fields remain disabled. The
   private cycle marker is not accepted from client JSON; DB backups preserve it.
