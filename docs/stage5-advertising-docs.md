@@ -40,8 +40,17 @@
 - [两张真实工具导航截图及来源](screenshots/README.md)。没有真实 Telegram 客户端会话，bot 画面能力限制明确；不伪造聊天截图，不拿历史截图充当当前菜单/向导。
 - [操作说明](telegram-admin-bot.md)覆盖当前四组菜单、确认/会话隔离、两种 WS+TLS 模板、证书校验、按需私聊链接/QR、恢复撤销、DB/核心失败边界及实际通知开关/时区/频率；Reality/Trojan/Shadowsocks 只是未实现候选，不宣称全模板支持。
 
+## S5-DOC-CRON-1 有界修复
+
+独立审查对阶段5提交 `5f70db42c37afe988f1aa3b3586d4d6ce8578904` 判定 `REPAIR_REQUIRED`：原操作说明的五字段 cron 示例与 `web/web.go` 的 `cron.WithSeconds()` 不一致，实际库拒绝注册；此前“通知频率文档正确”的结论不成立。
+
+- 仅修正摘要说明为含秒的六字段 cron：每日 `0 0 8 * * *`、每周一 `0 0 8 * * 1`、每月1日 `0 0 8 1 * *`；保留 `@daily` 默认、读取失败/空值回退及无效非空表达式注册失败而非自动回退的警告。
+- 新增 `docs/telegram_cron_test.go`：读取真实文档和 scheduler 配置，使用项目实际 `github.com/robfig/cron/v3` 库注册文档示例并校验下次触发时间；同时验证三个旧五字段表达式均被拒绝且没有注册默认任务。scheduler 不启动，不执行任务或发送通知。
+- 真实 RED：原文档三个五字段示例均出现 `expected exactly 6 fields, found 5`，`@daily` 通过；修正文档后同一回归 GREEN。执行 `go test -count=1 -v ./docs`、既有五个文档/UI 相关 Node 回归和 `git diff --check`；日志与真实退出码保存于 `/root/.hermes/cache/scratch/xpanel-stage5-cron-doc-repair/`，最终 SHA/CI 状态以修复结构化结果为准。
+- runtime、installer、功能、Go 依赖和工作流均未修改。复用独立审查已接受的完整 Go/race、浏览器及前阶段安全证据，不重跑无变更矩阵；这些证据不是本修复的新执行结果，也不证明交付包或生产部署完成。
+
 ## 交接
 
 提交前审计全部工作流：release / Docker 仅手动，push/PR 只做只读权限的验证；本轮只向既有 downstream-validation 添加新 Node 回归，不触发发布。PR #8 保持 draft，不 merge/tag/release。源码更新不等于已安装面板改变。
 
-下一 owner 为 `cron:24dc0e229b27`：对最终 changed-source 独立有界审查，再进入独立双架构包与 RN5 验证准备。本轮未接触 RN5、用户生产主机、`/usr/local/x-ui`、远端文件或 Hermes 配置；生产升级仍需精确权限门禁。最终 SHA、远端/CI 读回和精确变更文件以阶段结构化结果为准，避免文档提交自引用。
+下一 owner 为 `cron:24dc0e229b27`：先消费修复 writer 的匹配 safe exit，仅对本修复执行独立有界 review；PASS 后直接进入已授权的隔离双架构包与 RN5 验证准备，没有新增用户审批门。修复结果 `READY` 仅表示交接独立修复 review，不是全项目完成或包认证。本修复不打包、不接触 RN5/生产、不发送 Telegram、不启动下一 worker，不 merge/release/deploy。生产升级仍需精确权限门禁。最终 SHA、远端/CI 读回和精确变更文件以阶段结构化结果为准，避免文档提交自引用。
