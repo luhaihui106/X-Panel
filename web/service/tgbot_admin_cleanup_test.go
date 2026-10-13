@@ -1,95 +1,80 @@
 package service
 
 import (
-	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"github.com/mymmrac/telego"
 	"strings"
 	"testing"
-
-	"github.com/mymmrac/telego"
-	"github.com/nicksnyder/go-i18n/v2/i18n"
-	"github.com/pelletier/go-toml/v2"
-	"golang.org/x/text/language"
-	"path/filepath"
 	"time"
-	"x-ui/web/global"
-	"x-ui/web/locale"
 )
 
 func TestBotMenuAndRetiredCallbacks(t *testing.T) {
-	bundle := i18n.NewBundle(language.English)
-	bundle.RegisterUnmarshalFunc("toml", toml.Unmarshal)
-	files, _ := filepath.Glob("../translation/translate.en_US.toml")
-	if len(files) == 0 {
-		t.Fatal("real bot translations not found")
+	n, methods := stage1FakeTelegram(t)
+	// Payload-derived messages include the whole actual Telegram keyboard.
+	root := func() {
+		n.answerCommand(&telego.Message{From: &telego.User{ID: 42}, Chat: telego.Chat{ID: 42, Type: "private"}, Text: "/start"}, 42, false)
 	}
-	for _, file := range files {
-		if _, err := bundle.LoadMessageFile(file); err != nil {
-			t.Fatal(err)
-		}
-	}
-	oldLocale := locale.LocalizerBot
-	locale.LocalizerBot = i18n.NewLocalizer(bundle, "en-US")
-	defer func() { locale.LocalizerBot = oldLocale }()
-	var payloads []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		payloads = append(payloads, string(body))
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"ok":true,"result":{"message_id":1,"date":1,"chat":{"id":42,"type":"private"}}}`)
-	}))
-	defer server.Close()
-	oldBot, oldRunning, oldHash := bot, isRunning, hashStorage
-	defer func() { bot, isRunning, hashStorage = oldBot, oldRunning, oldHash }()
-	notifier := &Tgbot{}
-	var err error
-	bot, err = notifier.NewBot(strings.Repeat("1", 9)+":"+strings.Repeat("a", 35), "", server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	isRunning = true
-	hashStorage = global.NewHashStorage(time.Minute)
-	notifier.SendAnswer(42, "menu", true)
-	if len(payloads) != 1 {
-		t.Fatal("administrator menu missing")
-	}
-	var menu struct {
-		ReplyMarkup struct {
-			Rows [][]struct {
-				Data string `json:"callback_data"`
-			} `json:"inline_keyboard"`
-		} `json:"reply_markup"`
-	}
-	if err := json.Unmarshal([]byte(payloads[0]), &menu); err != nil {
-		t.Fatal(err)
-	}
+	root()
+	groups := []string{"menu_status", "menu_clients", "menu_backup", "menu_system"}
 	found := map[string]bool{}
-	for _, row := range menu.ReplyMarkup.Rows {
-		for _, button := range row {
-			data := button.Data
-			if issued, ok := issuedCallbacks[data]; ok {
-				data = issued.data
+	inspect := func(message telego.Message) {
+		for _, row := range message.ReplyMarkup.InlineKeyboard {
+			for _, b := range row {
+				r, ok := issuedCallbacks[b.CallbackData]
+				if !ok {
+					t.Fatal("outbound button not issued")
+				}
+				found[r.data] = true
+				if strings.Contains(r.data, "lottery") || strings.Contains(r.data, "vps_recommend") || strings.Contains(r.data, "oneclick") {
+					t.Fatalf("retired menu entry %s", r.data)
+				}
 			}
-			found[data] = true
 		}
 	}
-	for _, retired := range []string{"lottery_play_menu", "vps_recommend", "oneclick_options"} {
-		if found[retired] {
-			t.Fatalf("retired menu action remains: %s", retired)
+	inspect(stage3OutboundMessages[42])
+	for _, group := range groups {
+		if !found[group] {
+			t.Fatalf("missing root group %s", group)
 		}
+		msg := stage3OutboundMessages[42]
+		var token string
+		for _, row := range msg.ReplyMarkup.InlineKeyboard {
+			for _, b := range row {
+				if issuedCallbacks[b.CallbackData].data == group {
+					token = b.CallbackData
+				}
+			}
+		}
+		if token == "" {
+			t.Fatalf("no payload button %s", group)
+		}
+		n.answerCallback(&telego.CallbackQuery{ID: token, From: telego.User{ID: 42}, Data: token, Message: &msg}, false)
+		inspect(stage3OutboundMessages[42])
+		back := stage3OutboundMessages[42]
+		var backToken string
+		for _, row := range back.ReplyMarkup.InlineKeyboard {
+			for _, b := range row {
+				if issuedCallbacks[b.CallbackData].data == "menu_root" {
+					backToken = b.CallbackData
+				}
+			}
+		}
+		if backToken == "" {
+			t.Fatal("no return button")
+		}
+		n.answerCallback(&telego.CallbackQuery{ID: backToken, From: telego.User{ID: 42}, Data: backToken, Message: &back}, false)
 	}
-	for _, retained := range []string{"get_usage", "restart_panel", "reset_all_traffics", "get_backup", "get_inbounds", "add_client", "subconverter_install"} {
-		if !found[retained] {
-			t.Fatalf("administrator action removed: %s", retained)
+	for _, action := range []string{"get_usage", "restart_panel", "reset_all_traffics", "get_backup", "get_inbounds", "add_client", "subconverter_install", "inbounds", "onlines", "get_banlogs", "get_sorted_traffic_usage_report", "deplete_soon", "commands"} {
+		if !found[action] {
+			t.Fatalf("administrator action removed: %s", action)
 		}
 	}
 	for _, action := range []string{"lottery_play", "lottery_skip", "lottery_play_menu", "vps_recommend", "oneclick_options", "oneclick_reality", "oneclick_switch_vision"} {
-		before := len(payloads)
-		notifier.answerCallback(&telego.CallbackQuery{ID: "test", Data: action, From: telego.User{ID: 42}, Message: &telego.Message{MessageID: 1, Chat: telego.Chat{ID: 42}}}, true)
-		if len(payloads) != before+1 || !strings.Contains(payloads[len(payloads)-1], "Access denied or button expired") {
-			t.Fatalf("retired callback not rejected safely: %s", action)
+		*methods = nil
+		q := securityQuery(42, action)
+		q.ID = action + time.Now().String()
+		n.answerCallback(q, true)
+		if len(*methods) != 1 || (*methods)[0] != "answerCallbackQuery" {
+			t.Fatalf("retired callback escaped: %s", action)
 		}
 	}
 }

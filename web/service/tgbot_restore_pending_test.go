@@ -33,6 +33,9 @@ func TestImportDBRevokesPendingBeforeClientIDReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	n.clientTelegramUserInfo(42, "review")
+	n.answerCallback(securityQuery(43, "add_client"), true)
+	staleWizard := latestWizardQuery(t,43,"add_client_to 1")
+	staleMutation := securityQuery(42,"reset_traffic_c review")
 	id := bindingRequests[42].id
 	current := filepath.Join(t.TempDir(), "current.db")
 	if err := database.GetDB().Exec("VACUUM INTO ?", current).Error; err != nil {
@@ -70,5 +73,8 @@ func TestImportDBRevokesPendingBeforeClientIDReuse(t *testing.T) {
 	if len(bindingRequests) != 0 {
 		t.Fatal("import left old pending")
 	}
+	if len(wizardSessions) != 0 { t.Error("import left old drafts") }
+	if _,ok:=n.authorizeCallback(staleWizard); ok { t.Error("restore accepted old wizard token") }
+	if _,ok:=n.authorizeCallback(staleMutation); ok { t.Error("restore accepted old mutation token") }
 
 }

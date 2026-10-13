@@ -10,11 +10,16 @@ import (
 	"github.com/mymmrac/telego"
 )
 
-// Serialize the inherited shared add-client wizard until it is per-user.
+// Serialize handler/restore transitions, not administrator ownership.
 var telegramInteractionMu sync.Mutex
-var wizardOwner int64
-var wizardUntil time.Time
-var wizardMessages = make(map[int]bool)
+
+type telegramWizard struct {
+	until    time.Time
+	messages map[int]bool
+	draft    *telegramClientDraft
+}
+
+var wizardSessions = make(map[int64]*telegramWizard)
 var bindingRequests = make(map[int64]struct {
 	id     int32
 	client int
@@ -84,7 +89,8 @@ func bindKeyboard(actor int64, message int, markup telego.ReplyMarkup) {
 }
 
 func rememberWizardMessage(chatId int64, messageId int, markup telego.ReplyMarkup) {
-	if chatId != wizardOwner || !time.Now().Before(wizardUntil) {
+	session := wizardSessions[chatId]
+	if session == nil || !time.Now().Before(session.until) {
 		return
 	}
 	keyboard, ok := markup.(*telego.InlineKeyboardMarkup)
@@ -103,7 +109,7 @@ func rememberWizardMessage(chatId int64, messageId int, markup telego.ReplyMarku
 				}
 			}
 			if strings.HasPrefix(data, "add_client") {
-				wizardMessages = map[int]bool{messageId: true}
+				session.messages = map[int]bool{messageId: true}
 				return
 			}
 		}
@@ -198,10 +204,8 @@ func (t *Tgbot) authorizeCallback(q *telego.CallbackQuery) (string, bool) {
 		}
 	}
 	if strings.HasPrefix(action, "add_client") {
-		if wizardOwner != 0 && now.Before(wizardUntil) && wizardOwner != q.From.ID {
-			return "", false
-		}
-		if action != "add_client" && (wizardOwner != q.From.ID || !now.Before(wizardUntil) || !wizardMessages[message.MessageID]) {
+		session := wizardSessions[q.From.ID]
+		if action != "add_client" && (session == nil || !now.Before(session.until) || !session.messages[message.MessageID]) {
 			return "", false
 		}
 	}
@@ -209,7 +213,7 @@ func (t *Tgbot) authorizeCallback(q *telego.CallbackQuery) (string, bool) {
 	if key == "" {
 		return "", false
 	}
-	oneShot := action == "reset_all_traffics_c" || action == "confirm_sub_install" || action == "restart_panel_confirm" || action == "add_client_submit_enable" || action == "add_client_submit_disable" || action == "reset_traffic_c" || action == "clear_ips_c" || action == "tgid_remove_c" || action == "toggle_enable_c" || action == "limit_traffic_c" || action == "reset_exp_c" || action == "ip_limit_c"
+	oneShot := action == "restart_core_confirm" || action == "reset_all_traffics_c" || action == "confirm_sub_install" || action == "restart_panel_confirm" || action == "add_client_submit_enable" || action == "add_client_submit_disable" || action == "reset_traffic_c" || action == "clear_ips_c" || action == "tgid_remove_c" || action == "toggle_enable_c" || action == "limit_traffic_c" || action == "reset_exp_c" || action == "ip_limit_c"
 	mutationKey := strconv.FormatInt(q.From.ID, 10) + ":" + strconv.Itoa(message.MessageID) + ":" + q.Data
 	if oneShot {
 		if _, used := consumedCallbacks[mutationKey]; used {
@@ -230,21 +234,18 @@ func (t *Tgbot) authorizeCallback(q *telego.CallbackQuery) (string, bool) {
 	}
 	if strings.HasPrefix(action, "add_client") {
 		if action == "add_client" {
-			wizardMessages = make(map[int]bool)
-			receiver_inbound_ID = 0
+			wizardSessions[q.From.ID] = &telegramWizard{draft: &telegramClientDraft{}, messages: make(map[int]bool)}
 			delete(userStates, q.From.ID)
 		}
-		wizardOwner = q.From.ID
-		wizardUntil = now.Add(20 * time.Minute)
-		if action == "add_client_cancel" {
-			defer func() { wizardOwner = 0; wizardUntil = time.Time{} }()
-		}
+		wizardSessions[q.From.ID].until = now.Add(20 * time.Minute)
 	}
 	return decoded, true
 }
 
 // Only implemented actions are routable. New handlers must opt in here.
 var callbackArity = map[string][2]int{
+	"restart_core_confirm": {1, 1}, "restart_core_cancel": {1, 1},
+	"menu_root": {1, 1}, "menu_status": {1, 1}, "menu_clients": {1, 1}, "menu_backup": {1, 1}, "menu_system": {1, 1},
 	"client_get_usage": {2, 2}, "client_refresh": {2, 2}, "client_cancel": {2, 2},
 	"ips_refresh": {2, 2}, "ips_cancel": {2, 2}, "tgid_refresh": {2, 2}, "tgid_cancel": {2, 2},
 	"reset_traffic": {2, 2}, "reset_traffic_c": {2, 2}, "limit_traffic": {2, 2}, "limit_traffic_c": {3, 3}, "limit_traffic_in": {3, 4},

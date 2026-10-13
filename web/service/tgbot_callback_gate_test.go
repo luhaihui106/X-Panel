@@ -42,8 +42,7 @@ func TestCallbackGateAdminReplayGroupAndWizard(t *testing.T) {
 	oldAdmins := adminIds
 	defer func() {
 		adminIds = oldAdmins
-		wizardOwner = 0
-		wizardUntil = time.Time{}
+		wizardSessions = map[int64]*telegramWizard{}
 		consumedCallbacks = make(map[string]time.Time)
 	}()
 	adminIds = []int64{42, 43}
@@ -83,8 +82,8 @@ func TestCallbackGateAdminReplayGroupAndWizard(t *testing.T) {
 		t.Fatal("admin wizard denied")
 	}
 	q = securityQuery(43, "add_client")
-	if _, ok := notifier.authorizeCallback(q); ok {
-		t.Fatal("second administrator overwrites shared wizard")
+	if _, ok := notifier.authorizeCallback(q); !ok {
+		t.Fatal("second administrator cannot start independent wizard")
 	}
 	q = securityQuery(42, "usage_refresh")
 	oldKeyboard := q
@@ -110,9 +109,8 @@ func TestCallbackGateAdminReplayGroupAndWizard(t *testing.T) {
 		t.Fatal("legitimate second refresh denied")
 	}
 	q = securityQuery(42, "add_client_submit_enable")
-	wizardMessages[9] = true
-	wizardOwner = 42
-	wizardUntil = time.Now().Add(time.Minute)
+	wizardSessions[42].messages[9] = true
+	wizardSessions[42].until = time.Now().Add(time.Minute)
 	if _, ok := notifier.authorizeCallback(q); !ok {
 		t.Fatal("current wizard submission denied")
 	}
@@ -129,6 +127,7 @@ func TestCallbackGateAdminReplayGroupAndWizard(t *testing.T) {
 		t.Fatal("prior wizard message allowed in new session")
 	}
 	q = securityQuery(43, "add_client_submit_enable")
+	wizardSessions[43].messages = map[int]bool{}
 	if _, ok := notifier.authorizeCallback(q); ok {
 		t.Fatal("second administrator can submit other's wizard")
 	}

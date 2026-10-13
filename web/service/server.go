@@ -712,6 +712,12 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 	// A traffic primary key can identify another client after database replacement.
 	// Revoke all outstanding Telegram bindings before switching even temporarily.
 	clear(bindingRequests)
+	clear(wizardSessions)
+	clear(userStates)
+	callbackRegistryMu.Lock()
+	clear(issuedCallbacks)
+	clear(consumedCallbacks)
+	callbackRegistryMu.Unlock()
 	if err = database.InitDB(tempPath); err != nil {
 		return common.NewErrorf("Error checking db: %v", err)
 	}

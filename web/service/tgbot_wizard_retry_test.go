@@ -12,7 +12,7 @@ func latestWizardQuery(t *testing.T, actor int64, action string) *telego.Callbac
 	callbackRegistryMu.Lock()
 	defer callbackRegistryMu.Unlock()
 	for token, r := range issuedCallbacks {
-		if r.actor == actor && r.data == action && wizardMessages[r.message] {
+		if session := wizardSessions[actor]; session != nil && r.actor == actor && r.data == action && session.messages[r.message] {
 			markup := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{{{Text: "actual rendered button", CallbackData: token}}}}
 			return &telego.CallbackQuery{ID: token, From: telego.User{ID: actor}, Data: token, Message: &telego.Message{MessageID: r.message, Date: time.Now().Unix(), Chat: telego.Chat{ID: actor, Type: "private"}, ReplyMarkup: markup}}
 		}
@@ -28,19 +28,10 @@ func TestWizardDuplicateEmailCorrectionRetryActualHandler(t *testing.T) {
 	n.xrayService = &XrayService{}
 	oldP := p
 	p = nil
-	t.Cleanup(func() { p = oldP; wizardOwner = 0; wizardMessages = map[int]bool{}; userStates = map[int64]string{} })
-	wizardOwner = 42
-	wizardUntil = time.Now().Add(time.Minute)
-	receiver_inbound_ID = 1
-	client_Id = "new-id"
-	client_Email = "review"
-	client_TgID = "0"
-	client_SubID = "retry-sub"
-	client_Comment = ""
-	client_TotalGB = 0
-	client_ExpiryTime = 0
-	client_LimitIP = 0
-	client_Reset = 0
+	t.Cleanup(func() { p = oldP; wizardSessions = map[int64]*telegramWizard{}; userStates = map[int64]string{} })
+	draft := &telegramClientDraft{receiver_inbound_ID: 1, client_Id: "new-id", client_Email: "review", client_TgID: "0", client_SubID: "retry-sub"}
+	wizardSessions[42] = &telegramWizard{until: time.Now().Add(time.Minute), messages: map[int]bool{}, draft: draft}
+	n = n.withDraft(draft)
 	text, err := n.BuildInboundClientDataMessage("review", "vless")
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +39,7 @@ func TestWizardDuplicateEmailCorrectionRetryActualHandler(t *testing.T) {
 	n.addClient(42, text)
 	first := latestWizardQuery(t, 42, "add_client_submit_enable")
 	n.answerCallback(first, true)
-	if wizardOwner != 42 {
+	if wizardSessions[42] == nil {
 		t.Fatal("failure released wizard owner")
 	}
 	retry := latestWizardQuery(t, 42, "add_client_submit_enable")
@@ -66,11 +57,11 @@ func TestWizardDuplicateEmailCorrectionRetryActualHandler(t *testing.T) {
 		t.Fatal("email correction state missing")
 	}
 	n.handleTelegramMessage(telego.Message{From: &telego.User{ID: 43}, Chat: telego.Chat{ID: 43, Type: "private"}, Text: "other-admin"})
-	if client_Email != "review" {
+	if draft.client_Email != "review" {
 		t.Fatal("other admin changed draft")
 	}
 	n.handleTelegramMessage(telego.Message{From: &telego.User{ID: 42}, Chat: telego.Chat{ID: 42, Type: "private"}, Text: "corrected"})
-	if client_Email != "corrected" {
+	if draft.client_Email != "corrected" {
 		t.Fatal("actual message handler did not correct draft")
 	}
 	n.answerCallback(latestWizardQuery(t, 42, "add_client_submit_enable"), true)
@@ -80,7 +71,7 @@ func TestWizardDuplicateEmailCorrectionRetryActualHandler(t *testing.T) {
 	}
 	inbound, _ = s.GetInbound(1)
 	clients, _ = s.GetClients(inbound)
-	if len(clients) != 2 || wizardOwner != 0 {
+	if len(clients) != 2 || wizardSessions[42] != nil {
 		t.Fatal("retry lifecycle incomplete")
 	}
 	n.answerCallback(retry, true)

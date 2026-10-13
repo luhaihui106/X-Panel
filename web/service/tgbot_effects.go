@@ -8,6 +8,7 @@ type telegramExternalEffects struct {
 	checkInstall func(int64)
 	install      func() error
 	restart      func(int64)
+	restartCore  func(int64)
 }
 
 type databaseImportCoreEffects struct {

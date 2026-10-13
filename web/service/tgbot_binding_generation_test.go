@@ -3,6 +3,7 @@ package service
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/mymmrac/telego"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,15 +24,26 @@ import (
 )
 
 var stage1OutboundRequests = map[int64]int32{}
+var stage3OutboundTexts = map[int64][]string{}
+var stage3OutboundMessages = map[int64]telego.Message{}
 
 // Only the loopback API is used; no Telegram credentials or network service.
 func stage1FakeTelegram(t *testing.T) (*Tgbot, *[]string) {
 	t.Helper()
 	t.Setenv("XUI_DB_FOLDER", t.TempDir())
 	oldOutbound := stage1OutboundRequests
+	oldTexts := stage3OutboundTexts
+	oldMessages := stage3OutboundMessages
+	stage3OutboundMessages = map[int64]telego.Message{}
+	t.Cleanup(func() { stage3OutboundMessages = oldMessages })
+	stage3OutboundTexts = map[int64][]string{}
+	t.Cleanup(func() { stage3OutboundTexts = oldTexts })
 	stage1OutboundRequests = make(map[int64]int32)
 	t.Cleanup(func() { stage1OutboundRequests = oldOutbound })
 	oldIssued, oldConsumed := issuedCallbacks, consumedCallbacks
+	oldSessions := wizardSessions
+	wizardSessions = make(map[int64]*telegramWizard)
+	t.Cleanup(func() { wizardSessions = oldSessions })
 	issuedCallbacks = make(map[string]issuedCallback)
 	consumedCallbacks = make(map[string]time.Time)
 	t.Cleanup(func() { issuedCallbacks, consumedCallbacks = oldIssued, oldConsumed })
@@ -61,9 +73,11 @@ func stage1FakeTelegram(t *testing.T) (*Tgbot, *[]string) {
 		if method == "sendMessage" || method == "editMessageText" {
 			var payload struct {
 				ChatID      int64           `json:"chat_id"`
+				Text        string          `json:"text"`
 				ReplyMarkup json.RawMessage `json:"reply_markup"`
 			}
 			json.NewDecoder(r.Body).Decode(&payload)
+			stage3OutboundTexts[payload.ChatID] = append(stage3OutboundTexts[payload.ChatID], payload.Text)
 			if strings.Contains(string(payload.ReplyMarkup), "request_users") {
 				methods = append(methods, "request_users")
 				var keyboard struct {
@@ -88,6 +102,10 @@ func stage1FakeTelegram(t *testing.T) (*Tgbot, *[]string) {
 				methods = append(methods, "remove_keyboard")
 			}
 			id++
+			var markup telego.InlineKeyboardMarkup
+			if err := json.Unmarshal(payload.ReplyMarkup, &markup); err == nil && len(markup.InlineKeyboard) > 0 {
+				stage3OutboundMessages[payload.ChatID] = telego.Message{MessageID: id, Date: time.Now().Unix(), Chat: telego.Chat{ID: payload.ChatID, Type: "private"}, Text: payload.Text, ReplyMarkup: &markup}
+			}
 			json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": id, "date": time.Now().Unix(), "chat": map[string]any{"id": payload.ChatID, "type": "private"}, "reply_markup": payload.ReplyMarkup}})
 		} else {
 			io.WriteString(w, `{"ok":true,"result":true}`)
