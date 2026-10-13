@@ -662,6 +662,10 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 	copyQuery := *callbackQuery
 	copyQuery.Data = decoded
 	callbackQuery = &copyQuery
+	if strings.HasPrefix(decoded, "inbound_result_") {
+		t.handleInboundResult(callbackQuery, decoded)
+		return
+	}
 	if strings.HasPrefix(decoded, "add_inbound") {
 		t.handleInboundCallback(callbackQuery, decoded)
 		return

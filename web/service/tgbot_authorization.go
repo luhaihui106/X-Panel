@@ -251,6 +251,7 @@ func (t *Tgbot) authorizeCallback(q *telego.CallbackQuery) (string, bool) {
 
 // Only implemented actions are routable. New handlers must opt in here.
 var callbackArity = map[string][2]int{
+	"inbound_result_link": {3, 3}, "inbound_result_qr": {3, 3},
 	"add_inbound": {1, 1}, "add_inbound_vless": {1, 1}, "add_inbound_vmess": {1, 1}, "add_inbound_confirm": {1, 1}, "add_inbound_edit": {1, 1}, "add_inbound_cancel": {1, 1},
 	"restart_core_confirm": {1, 1}, "restart_core_cancel": {1, 1},
 	"menu_root": {1, 1}, "menu_status": {1, 1}, "menu_clients": {1, 1}, "menu_backup": {1, 1}, "menu_system": {1, 1},

@@ -2,6 +2,7 @@ package service
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -204,6 +205,18 @@ func (t *Tgbot) buildInbound(d *telegramInboundDraft) (*model.Inbound, error) {
 	if err != nil {
 		return nil, err
 	}
+	pair, err := tls.LoadX509KeyPair(cert["certificateFile"].(string), cert["keyFile"].(string))
+	if err != nil || len(pair.Certificate) == 0 {
+		return nil, fmt.Errorf("已有证书不可用")
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("已有证书不可用")
+	}
+	now := time.Now()
+	if leaf.VerifyHostname(d.domain) != nil || now.Before(leaf.NotBefore) || now.After(leaf.NotAfter) {
+		return nil, fmt.Errorf("证书域名或有效期不匹配")
+	}
 	client := model.Client{ID: d.clientID, SubID: d.subID, Email: d.email, TotalGB: d.total, ExpiryTime: d.expiry, Enable: true, MonthlyResetEnabled: d.monthlyDay > 0, MonthlyResetDay: d.monthlyDay}
 	settings := map[string]any{"clients": []model.Client{client}}
 	if d.protocol == model.VLESS {
@@ -274,13 +287,13 @@ func (t *Tgbot) handleInboundCallback(q *telego.CallbackQuery, action string) {
 			return
 		}
 		delete(wizardSessions, actor)
-		text := fmt.Sprintf("已提交入站 #%d。连接链接 / QR 请主动在现有面板入站编辑器中获取；未发送连接秘密。", in.Id)
+		text := fmt.Sprintf("已提交入站 #%d。需要连接链接 / QR 时请主动点击下方按钮；未发送连接秘密。", in.Id)
 		if needsReconcile {
 			if t.xrayService != nil {
 				t.xrayService.SetToNeedRestart()
 			}
 			text += "\n核心应用失败 / 待重试：数据已保留，勿重复创建。请在现有面板检查并重试核心应用。"
 		}
-		t.SendMsgToTgbot(actor, text)
+		t.SendMsgToTgbot(actor, text, inboundResultKeyboard(in, d.clientID))
 	}
 }
