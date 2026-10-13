@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"github.com/xtls/xray-core/app/proxyman/command"
 	"strings"
 	"testing"
@@ -13,6 +14,9 @@ import (
 
 func (h *commitHandler) AddInbound(context.Context, *command.AddInboundRequest) (*command.AddInboundResponse, error) {
 	h.calls.Add(1)
+	if h.fail {
+		return nil, fmt.Errorf("injected add inbound core failure")
+	}
 	return &command.AddInboundResponse{}, nil
 }
 

@@ -17,6 +17,7 @@ type telegramWizard struct {
 	until    time.Time
 	messages map[int]bool
 	draft    *telegramClientDraft
+	inbound  *telegramInboundDraft
 }
 
 var wizardSessions = make(map[int64]*telegramWizard)
@@ -108,7 +109,7 @@ func rememberWizardMessage(chatId int64, messageId int, markup telego.ReplyMarku
 					data = decoded
 				}
 			}
-			if strings.HasPrefix(data, "add_client") {
+			if strings.HasPrefix(data, "add_client") || strings.HasPrefix(data, "add_inbound") {
 				session.messages = map[int]bool{messageId: true}
 				return
 			}
@@ -205,7 +206,13 @@ func (t *Tgbot) authorizeCallback(q *telego.CallbackQuery) (string, bool) {
 	}
 	if strings.HasPrefix(action, "add_client") {
 		session := wizardSessions[q.From.ID]
-		if action != "add_client" && (session == nil || !now.Before(session.until) || !session.messages[message.MessageID]) {
+		if action != "add_client" && (session == nil || session.draft == nil || !now.Before(session.until) || !session.messages[message.MessageID]) {
+			return "", false
+		}
+	}
+	if strings.HasPrefix(action, "add_inbound") && action != "add_inbound" {
+		session := wizardSessions[q.From.ID]
+		if session == nil || session.inbound == nil || !now.Before(session.until) || !session.messages[message.MessageID] {
 			return "", false
 		}
 	}
@@ -213,7 +220,7 @@ func (t *Tgbot) authorizeCallback(q *telego.CallbackQuery) (string, bool) {
 	if key == "" {
 		return "", false
 	}
-	oneShot := action == "restart_core_confirm" || action == "reset_all_traffics_c" || action == "confirm_sub_install" || action == "restart_panel_confirm" || action == "add_client_submit_enable" || action == "add_client_submit_disable" || action == "reset_traffic_c" || action == "clear_ips_c" || action == "tgid_remove_c" || action == "toggle_enable_c" || action == "limit_traffic_c" || action == "reset_exp_c" || action == "ip_limit_c"
+	oneShot := action == "add_inbound" || action == "add_inbound_confirm" || action == "restart_core_confirm" || action == "reset_all_traffics_c" || action == "confirm_sub_install" || action == "restart_panel_confirm" || action == "add_client_submit_enable" || action == "add_client_submit_disable" || action == "reset_traffic_c" || action == "clear_ips_c" || action == "tgid_remove_c" || action == "toggle_enable_c" || action == "limit_traffic_c" || action == "reset_exp_c" || action == "ip_limit_c"
 	mutationKey := strconv.FormatInt(q.From.ID, 10) + ":" + strconv.Itoa(message.MessageID) + ":" + q.Data
 	if oneShot {
 		if _, used := consumedCallbacks[mutationKey]; used {
@@ -244,6 +251,7 @@ func (t *Tgbot) authorizeCallback(q *telego.CallbackQuery) (string, bool) {
 
 // Only implemented actions are routable. New handlers must opt in here.
 var callbackArity = map[string][2]int{
+	"add_inbound": {1, 1}, "add_inbound_vless": {1, 1}, "add_inbound_vmess": {1, 1}, "add_inbound_confirm": {1, 1}, "add_inbound_edit": {1, 1}, "add_inbound_cancel": {1, 1},
 	"restart_core_confirm": {1, 1}, "restart_core_cancel": {1, 1},
 	"menu_root": {1, 1}, "menu_status": {1, 1}, "menu_clients": {1, 1}, "menu_backup": {1, 1}, "menu_system": {1, 1},
 	"client_get_usage": {2, 2}, "client_refresh": {2, 2}, "client_cancel": {2, 2},

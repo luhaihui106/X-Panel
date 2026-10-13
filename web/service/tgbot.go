@@ -356,6 +356,9 @@ func (t *Tgbot) handleTelegramMessage(message telego.Message) error {
 		return nil
 	}
 	session := wizardSessions[message.From.ID]
+	if message.UsersShared == nil && session != nil && session.inbound != nil {
+		return t.handleInboundText(message)
+	}
 	if message.UsersShared == nil && (session == nil || !time.Now().Before(session.until)) {
 		return nil
 	}
@@ -659,6 +662,10 @@ func (t *Tgbot) answerCallback(callbackQuery *telego.CallbackQuery, isAdmin bool
 	copyQuery := *callbackQuery
 	copyQuery.Data = decoded
 	callbackQuery = &copyQuery
+	if strings.HasPrefix(decoded, "add_inbound") {
+		t.handleInboundCallback(callbackQuery, decoded)
+		return
+	}
 	if session := wizardSessions[chatId]; session != nil {
 		t = t.withDraft(session.draft)
 	}

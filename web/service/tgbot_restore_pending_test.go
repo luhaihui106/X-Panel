@@ -34,6 +34,8 @@ func TestImportDBRevokesPendingBeforeClientIDReuse(t *testing.T) {
 	}
 	n.clientTelegramUserInfo(42, "review")
 	n.answerCallback(securityQuery(43, "add_client"), true)
+	n.answerCallback(securityQuery(42, "add_inbound"), true)
+	staleInbound := stage4Rendered(t, 42, "add_inbound_vless")
 	staleWizard := latestWizardQuery(t,43,"add_client_to 1")
 	staleMutation := securityQuery(42,"reset_traffic_c review")
 	id := bindingRequests[42].id
@@ -76,5 +78,7 @@ func TestImportDBRevokesPendingBeforeClientIDReuse(t *testing.T) {
 	if len(wizardSessions) != 0 { t.Error("import left old drafts") }
 	if _,ok:=n.authorizeCallback(staleWizard); ok { t.Error("restore accepted old wizard token") }
 	if _,ok:=n.authorizeCallback(staleMutation); ok { t.Error("restore accepted old mutation token") }
+	n.answerCallback(staleInbound, true)
+	if len(wizardSessions) != 0 { t.Error("restore accepted old inbound wizard") }
 
 }
