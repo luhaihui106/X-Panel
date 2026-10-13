@@ -1,6 +1,7 @@
 package service
 
 import (
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"x-ui/config"
 	"x-ui/database"
 	"x-ui/web/global"
 	"x-ui/web/locale"
@@ -20,9 +22,19 @@ import (
 	"os"
 )
 
+var stage1OutboundRequests = map[int64]int32{}
+
 // Only the loopback API is used; no Telegram credentials or network service.
 func stage1FakeTelegram(t *testing.T) (*Tgbot, *[]string) {
 	t.Helper()
+	t.Setenv("XUI_DB_FOLDER", t.TempDir())
+	oldOutbound := stage1OutboundRequests
+	stage1OutboundRequests = make(map[int64]int32)
+	t.Cleanup(func() { stage1OutboundRequests = oldOutbound })
+	oldIssued, oldConsumed := issuedCallbacks, consumedCallbacks
+	issuedCallbacks = make(map[string]issuedCallback)
+	consumedCallbacks = make(map[string]time.Time)
+	t.Cleanup(func() { issuedCallbacks, consumedCallbacks = oldIssued, oldConsumed })
 	oldLocale, oldHash := locale.LocalizerBot, hashStorage
 	bundle := i18n.NewBundle(language.English)
 	bundle.RegisterUnmarshalFunc("toml", toml.Unmarshal)
@@ -52,6 +64,29 @@ func stage1FakeTelegram(t *testing.T) (*Tgbot, *[]string) {
 				ReplyMarkup json.RawMessage `json:"reply_markup"`
 			}
 			json.NewDecoder(r.Body).Decode(&payload)
+			if strings.Contains(string(payload.ReplyMarkup), "request_users") {
+				methods = append(methods, "request_users")
+				var keyboard struct {
+					Keyboard [][]struct {
+						RequestUsers *struct {
+							RequestID int32 `json:"request_id"`
+						} `json:"request_users"`
+					} `json:"keyboard"`
+				}
+				if err := json.Unmarshal(payload.ReplyMarkup, &keyboard); err != nil {
+					t.Error(err)
+				}
+				for _, row := range keyboard.Keyboard {
+					for _, button := range row {
+						if button.RequestUsers != nil {
+							stage1OutboundRequests[payload.ChatID] = button.RequestUsers.RequestID
+						}
+					}
+				}
+			}
+			if strings.Contains(string(payload.ReplyMarkup), "remove_keyboard") {
+				methods = append(methods, "remove_keyboard")
+			}
 			id++
 			json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": id, "date": time.Now().Unix(), "chat": map[string]any{"id": payload.ChatID, "type": "private"}, "reply_markup": payload.ReplyMarkup}})
 		} else {
@@ -65,6 +100,7 @@ func stage1FakeTelegram(t *testing.T) (*Tgbot, *[]string) {
 	}
 	adminIds, isRunning = []int64{42, 43}, true
 	t.Cleanup(func() {
+		notifier.deferredDeletes.Wait()
 		srv.Close()
 		bot, adminIds, isRunning = oldBot, oldAdmins, oldRunning
 		bindingRequests = make(map[int64]struct {
@@ -123,12 +159,25 @@ func TestBindingGenerationStorageFailureFailsClosed(t *testing.T) {
 	s, _ := reviewDB(t, false, false)
 	notifier, methods := stage1FakeTelegram(t)
 	notifier.inboundService = s
-	if err := database.GetDB().Exec(`CREATE TRIGGER reject_binding BEFORE INSERT ON telegram_binding_sequences BEGIN SELECT RAISE(FAIL, 'injected reservation failure'); END`).Error; err != nil {
+	notifier.clientTelegramUserInfo(42, "review")
+	if _, ok := bindingRequests[42]; !ok {
+		t.Fatal("missing existing pending")
+	}
+	ledger, err := sql.Open("sqlite3", filepath.Join(config.GetDBFolderPath(), "telegram-binding-issuance.db"))
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer ledger.Close()
+	if _, err := ledger.Exec(`CREATE TRIGGER reject_binding BEFORE UPDATE ON issuance BEGIN SELECT RAISE(FAIL, 'injected reservation failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	*methods = nil
 	notifier.clientTelegramUserInfo(42, "review")
 	if _, ok := bindingRequests[42]; ok {
 		t.Fatalf("binding request escaped failed durable reservation; API calls=%v", *methods)
+	}
+	if strings.Contains(strings.Join(*methods, ","), "request_users") || !strings.Contains(strings.Join(*methods, ","), "remove_keyboard") {
+		t.Fatalf("failed reservation keyboard: %v", *methods)
 	}
 }
 

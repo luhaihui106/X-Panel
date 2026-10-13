@@ -95,12 +95,13 @@ type Release struct {
 }
 
 type ServerService struct {
-	xrayService    XrayService
-	inboundService InboundService
-	tgService      TelegramService
-	cachedIPv4     string
-	cachedIPv6     string
-	noIPv6         bool
+	importCoreEffects *databaseImportCoreEffects
+	xrayService       XrayService
+	inboundService    InboundService
+	tgService         TelegramService
+	cachedIPv4        string
+	cachedIPv6        string
+	noIPv6            bool
 }
 
 // 【新增方法】: 用于从外部注入 TelegramService 实例
@@ -655,6 +656,8 @@ func (s *ServerService) GetDb() ([]byte, error) {
 }
 
 func (s *ServerService) ImportDB(file multipart.File) error {
+	telegramInteractionMu.Lock()
+	defer telegramInteractionMu.Unlock()
 	// Check if the file is a SQLite database
 	isValidDb, err := database.IsSQLiteDB(file)
 	if err != nil {
@@ -706,12 +709,19 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 	}
 
 	// Check if we can init the db or not
+	// A traffic primary key can identify another client after database replacement.
+	// Revoke all outstanding Telegram bindings before switching even temporarily.
+	clear(bindingRequests)
 	if err = database.InitDB(tempPath); err != nil {
 		return common.NewErrorf("Error checking db: %v", err)
 	}
 
 	// Stop Xray
-	s.StopXrayService()
+	if s.importCoreEffects != nil {
+		s.importCoreEffects.stop()
+	} else {
+		s.StopXrayService()
+	}
 
 	// Backup the current database for fallback
 	fallbackPath := fmt.Sprintf("%s.backup", config.GetDBPath())
@@ -757,7 +767,12 @@ func (s *ServerService) ImportDB(file multipart.File) error {
 	s.inboundService.MigrateDB()
 
 	// Start Xray
-	if err = s.RestartXrayService(); err != nil {
+	if s.importCoreEffects != nil {
+		err = s.importCoreEffects.restart()
+	} else {
+		err = s.RestartXrayService()
+	}
+	if err != nil {
 		return common.NewErrorf("Imported DB but failed to start Xray: %v", err)
 	}
 
