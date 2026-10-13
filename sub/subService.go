@@ -301,8 +301,7 @@ func (s *SubService) genVmessLink(inbound *model.Inbound, email string) string {
 
 	obj["ps"] = s.genRemark(inbound, email, "")
 
-	jsonStr, _ := json.MarshalIndent(obj, "", "  ")
-	return "vmess://" + base64.StdEncoding.EncodeToString(jsonStr)
+	return common.VMessLink(obj)
 }
 
 func (s *SubService) genVlessLink(inbound *model.Inbound, email string) string {
@@ -490,19 +489,7 @@ func (s *SubService) genVlessLink(inbound *model.Inbound, email string) string {
 		return links
 	}
 
-	link := fmt.Sprintf("vless://%s@%s:%d", uuid, address, port)
-	url, _ := url.Parse(link)
-	q := url.Query()
-
-	for k, v := range params {
-		q.Add(k, v)
-	}
-
-	// Set the new query values on the URL
-	url.RawQuery = q.Encode()
-
-	url.Fragment = s.genRemark(inbound, email, "")
-	return url.String()
+	return common.VLESSLink(uuid, address, port, params, s.genRemark(inbound, email, ""))
 }
 
 func (s *SubService) genTrojanLink(inbound *model.Inbound, email string) string {

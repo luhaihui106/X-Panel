@@ -36,6 +36,7 @@ func initModels() error {
 		&model.InboundClientIps{},
 		&xray.ClientTraffic{},
 		&model.TrafficIdentity{},
+		&model.TelegramBindingSequence{},
 		&model.HistoryOfSeeders{},
 		&LinkHistory{},   // 把 LinkHistory 表也迁移
 		&model.LotteryWin{},  // 新增 抽奖游戏LotteryWin 数据模型

@@ -11,5 +11,7 @@
 - [身份处理阶段性验证报告](traffic-identity-validation.md)
 - [界面截图与隔离演示来源](screenshots/README.md)
 - [首页自动推广删除与验证](home-promotion-removal.md)
+- [Telegram 管理员菜单、入站向导、通知开关与边界](telegram-admin-bot.md)
+- [第5阶段：剩余广告清理、出站审计与文档证据](stage5-advertising-docs.md)
 
 阶段性报告仅覆盖各自注明的提交和测试范围，不能将其中“未部署/未覆盖其他平台”等当时状态当作当前完整状态；当前公开分支/Release 状态以项目入口及实际 GitHub 记录为准。文档不存放生产运维数据或本地验收包。

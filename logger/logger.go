@@ -3,14 +3,16 @@ package logger
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/op/go-logging"
 )
 
 var (
-	logger    *logging.Logger
-	logBuffer []struct {
+	logBufferMu sync.RWMutex
+	logger      *logging.Logger
+	logBuffer   []struct {
 		time  string
 		level logging.Level
 		log   string
@@ -98,6 +100,8 @@ func Errorf(format string, args ...any) {
 }
 
 func addToBuffer(level string, newLog string) {
+	logBufferMu.Lock()
+	defer logBufferMu.Unlock()
 	t := time.Now()
 	if len(logBuffer) >= 10240 {
 		logBuffer = logBuffer[1:]
@@ -116,6 +120,8 @@ func addToBuffer(level string, newLog string) {
 }
 
 func GetLogs(c int, level string) []string {
+	logBufferMu.RLock()
+	defer logBufferMu.RUnlock()
 	var output []string
 	logLevel, _ := logging.LogLevel(level)
 
